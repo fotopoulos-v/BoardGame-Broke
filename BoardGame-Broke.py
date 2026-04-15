@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from typing import List
 import urllib.parse
 import os
-from config import FIRECRAWL_API_KEY
+# from config import FIRECRAWL_API_KEY
 import json
 import html as _html
 
@@ -540,7 +540,7 @@ def _efantasy_request_key(query, session_id):
 def search_efantasy(game_query):
     """Search eFantasy directly via Findbar API"""
     import requests as _requests
-    from config import EFANTASY_SESSION_ID
+    # from config import EFANTASY_SESSION_ID
 
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0",
@@ -708,11 +708,11 @@ def search_public(game_query):
     """Search Public directly through Findbar API and parse board-game results."""
     import requests as _requests
 
-    try:
-        from config import PUBLIC_FINDBAR_BEARER_TOKEN, PUBLIC_FINDBAR_SESSION_ID
-    except Exception:
-        PUBLIC_FINDBAR_BEARER_TOKEN = ""
-        PUBLIC_FINDBAR_SESSION_ID = ""
+    # try:
+    #     # from config import PUBLIC_FINDBAR_BEARER_TOKEN, PUBLIC_FINDBAR_SESSION_ID
+    # except Exception:
+    #     PUBLIC_FINDBAR_BEARER_TOKEN = ""
+    #     PUBLIC_FINDBAR_SESSION_ID = ""
 
     bearer_token = ""
     session_id = ""
