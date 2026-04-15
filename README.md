@@ -76,17 +76,6 @@ Here's what happens behind the scenes:
 
 ---
 
-## ⚙️ Configuration
-
-The app requires the following secrets (set via Streamlit secrets or a local `config.py`):
-
-| Secret | Description |
-|--------|-------------|
-| `FIRECRAWL_API_KEY` | API key for Firecrawl web scraping |
-| `EFANTASY_SESSION_ID` | Session ID for eFantasy Findbar search |
-
----
-
 ## ⚠️ Disclaimer
 
 The prices, availability, and links shown in this app are collected automatically and may not always be fully accurate. Store websites can change their structure, product pages, or stock information at any time, which may affect the results displayed here. Please verify all details directly on the store's website before making any purchase decision.
