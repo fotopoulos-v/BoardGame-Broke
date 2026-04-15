@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.env
+venv/
+.env/
+
+
+test_data.html
+
+sites_to_add.txt
+
+temp/
+
