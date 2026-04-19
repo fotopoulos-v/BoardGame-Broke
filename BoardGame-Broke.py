@@ -583,9 +583,10 @@ def search_efantasy(game_query):
 
     if not session_id:
         return []
-
+    print("SESSION ID USED:", session_id)
     # Generate request_key and search
     request_key = _efantasy_request_key(game_query, session_id)
+    print("request key USED:", request_key)
     try:
         r = _requests.get(
             "https://app.findbar.io/search/efantasy.gr/full",
