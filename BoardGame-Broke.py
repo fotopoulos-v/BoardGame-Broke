@@ -537,73 +537,162 @@ def _efantasy_request_key(query, session_id):
     inner = md5('efantasy.gr|' + sorted_params)
     return md5(inner + 'y0YIfLTE8g')
 
+# def search_efantasy(game_query):
+#     """Search eFantasy directly via Findbar API"""
+#     import requests as _requests
+#     from config import EFANTASY_SESSION_ID
+
+#     headers = {
+#         "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0",
+#         "Accept": "*/*",
+#         "Accept-Language": "el-GR,el;q=0.9",
+#         "Origin": "https://www.efantasy.gr",
+#         "Referer": "https://www.efantasy.gr/",
+#         "Sec-Fetch-Dest": "empty",
+#         "Sec-Fetch-Mode": "cors",
+#         "Sec-Fetch-Site": "cross-site",
+#         "Cache-Control": "no-cache",
+#     }
+
+#     # Try to get session_id — first from config/secrets, then by requesting one
+#     session_id = ""
+
+#     # Check Streamlit secrets first (for cloud deployment)
+#     try:
+#         import streamlit as st
+#         session_id = st.secrets.get("EFANTASY_SESSION_ID", "")
+#     except Exception:
+#         pass
+
+#     # Fall back to config.py (for local deployment)
+#     if not session_id:
+#         session_id = EFANTASY_SESSION_ID
+
+#     # Last resort: try to get one from Findbar directly
+#     if not session_id:
+#         try:
+#             r0 = _requests.get(
+#                 "https://app.findbar.io/search/efantasy.gr/full",
+#                 params={"αναζήτηση": game_query, "initial_request": "1"},
+#                 headers=headers,
+#                 timeout=15
+#             )
+#             session_id = r0.headers.get('x-session-id', '')
+#         except Exception:
+#             pass
+
+#     if not session_id:
+#         return []
+#     print("SESSION ID USED:", session_id)
+#     # Generate request_key and search
+#     request_key = _efantasy_request_key(game_query, session_id)
+#     print("request key USED:", request_key)
+#     try:
+#         r = _requests.get(
+#             "https://app.findbar.io/search/efantasy.gr/full",
+#             params={
+#                 "αναζήτηση": game_query,
+#                 "initial_request": "1",
+#                 "session_id": session_id,
+#                 "request_key": request_key,
+#             },
+#             headers=headers,
+#             timeout=15
+#         )
+#         if r.status_code != 200:
+#             return []
+#         return parse_efantasy_html(r.text, game_query)
+#     except Exception:
+#         return []
+
 def search_efantasy(game_query):
-    """Search eFantasy directly via Findbar API"""
     import requests as _requests
     from config import EFANTASY_SESSION_ID
+    import time
+
+    BASE_URL = "https://app.findbar.io/search/efantasy.gr/full"
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0",
+        "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:149.0) Gecko/20100101 Firefox/149.0",
         "Accept": "*/*",
         "Accept-Language": "el-GR,el;q=0.9",
         "Origin": "https://www.efantasy.gr",
         "Referer": "https://www.efantasy.gr/",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "cross-site",
         "Cache-Control": "no-cache",
     }
 
-    # Try to get session_id — first from config/secrets, then by requesting one
+    def _do_request(query, session_id):
+        request_key = _efantasy_request_key(query, session_id)
+
+        try:
+            r = _requests.get(
+                BASE_URL,
+                params={
+                    "αναζήτηση": query,
+                    "initial_request": "1",
+                    "session_id": session_id,
+                    "request_key": request_key,
+                },
+                headers=headers,
+                timeout=15,
+            )
+
+            if r.status_code != 200:
+                return []
+
+            return parse_efantasy_html(r.text, query)
+
+        except Exception:
+            return []
+
+    # ─────────────────────────────────────────────
+    # STEP 1: try existing session (secrets/config)
+    # ─────────────────────────────────────────────
     session_id = ""
 
-    # Check Streamlit secrets first (for cloud deployment)
     try:
         import streamlit as st
         session_id = st.secrets.get("EFANTASY_SESSION_ID", "")
     except Exception:
         pass
 
-    # Fall back to config.py (for local deployment)
     if not session_id:
         session_id = EFANTASY_SESSION_ID
 
-    # Last resort: try to get one from Findbar directly
-    if not session_id:
-        try:
-            r0 = _requests.get(
-                "https://app.findbar.io/search/efantasy.gr/full",
-                params={"αναζήτηση": game_query, "initial_request": "1"},
-                headers=headers,
-                timeout=15
-            )
-            session_id = r0.headers.get('x-session-id', '')
-        except Exception:
-            pass
+    if session_id:
+        results = _do_request(game_query, session_id)
+        if results:
+            return results
 
-    if not session_id:
-        return []
-    print("SESSION ID USED:", session_id)
-    # Generate request_key and search
-    request_key = _efantasy_request_key(game_query, session_id)
-    print("request key USED:", request_key)
+    # ─────────────────────────────────────────────
+    # STEP 2: force new session via valid flow
+    # ─────────────────────────────────────────────
     try:
-        r = _requests.get(
-            "https://app.findbar.io/search/efantasy.gr/full",
+        r0 = _requests.get(
+            BASE_URL,
             params={
                 "αναζήτηση": game_query,
                 "initial_request": "1",
-                "session_id": session_id,
-                "request_key": request_key,
             },
             headers=headers,
-            timeout=15
+            timeout=15,
         )
-        if r.status_code != 200:
+
+        new_session = r0.headers.get("x-session-id", "")
+
+        if not new_session:
             return []
-        return parse_efantasy_html(r.text, game_query)
+
+        # IMPORTANT: small delay (Findbar sometimes needs it)
+        time.sleep(0.3)
+
+        results = _do_request(game_query, new_session)
+
+        return results
+
     except Exception:
         return []
+
 
 
 def parse_public_html(content, game_query):
