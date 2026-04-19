@@ -2271,7 +2271,7 @@ def parse_ozon_html(content, game_query):
 
     pattern = (
         r'<a[^>]*class="[^"]*fs-serp-product-title[^"]*"[^>]*'
-        r'href="(https://www\.ozon\.gr/(?:product/|catalog/product/view/id/)[^"]+)"[^>]*>'
+        r'href="(https://www\.ozon\.gr/product/[^"]+)"[^>]*>'
         r'.*?<span[^>]*class="[^"]*fs-product-title[^"]*"[^>]*'
         r'aria-label="([^"]+)"'
     )

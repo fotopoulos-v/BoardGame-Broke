@@ -1,7 +1,6 @@
-import streamlit as st
-
-FIRECRAWL_API_KEY = st.secrets["FIRECRAWL_API_KEY"]
-EFANTASY_SESSION_ID = st.secrets["EFANTASY_SESSION_ID"]
+FIRECRAWL_API_KEY = "fc-ecc86088dc5e42a3aa4ea1a9fe69e0c9"
+# EFANTASY_SESSION_ID = "r7VBVEoumtmie0ZGYWAjwcc1d5raIUq"
+EFANTASY_SESSION_ID = "zfGlsnEZ2JcLEjjF5lZseR0z-Q6RS5d8"
 
 # Optional overrides for Public Findbar API search.
 # If left empty, code falls back to built-in defaults captured from observed traffic.
