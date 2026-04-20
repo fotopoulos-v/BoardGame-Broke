@@ -76,6 +76,49 @@ Here's what happens behind the scenes:
 
 ---
 
+## 📈 Permanent Usage Analytics (Supabase)
+
+The app can log anonymous usage events to Supabase for permanent analytics storage.
+
+### 1) Create the table in Supabase
+
+Open **SQL Editor** in Supabase and run the SQL from:
+
+- `supabase_usage_events.sql`
+
+### 2) Add Streamlit secrets
+
+In Streamlit Cloud app settings, add these secrets:
+
+```toml
+SUPABASE_URL = "https://<your-project-ref>.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY = "<your-service-role-key>"
+SUPABASE_EVENTS_TABLE = "usage_events"
+```
+
+### 3) Optional runtime flags
+
+```toml
+BGB_USAGE_LOGGING = "1"
+BGB_USAGE_LOCAL_FALLBACK = "1"
+```
+
+- `BGB_USAGE_LOGGING=0` disables analytics.
+- `BGB_USAGE_LOCAL_FALLBACK=1` writes local JSONL when Supabase is unavailable.
+
+### 4) What gets logged
+
+- `session_started`
+- `search_submitted`
+- `search_completed`
+- `search_errors`
+- `search_failed`
+- `pdf_download_clicked`
+
+All events include timestamp, anonymous session ID, and event payload.
+
+---
+
 ## ⚠️ Disclaimer
 
 The prices, availability, and links shown in this app are collected automatically and may not always be fully accurate. Store websites can change their structure, product pages, or stock information at any time, which may affect the results displayed here. Please verify all details directly on the store's website before making any purchase decision.

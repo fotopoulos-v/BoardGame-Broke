@@ -8,6 +8,8 @@ import json
 import threading
 import unicodedata
 import uuid
+import urllib.error
+import urllib.request
 from io import BytesIO
 from datetime import datetime
 from xml.sax.saxutils import escape
@@ -34,8 +36,65 @@ USAGE_LOG_PATH = pathlib.Path(__file__).parent / "data" / "usage_events.jsonl"
 _USAGE_LOG_LOCK = threading.Lock()
 
 
+def _read_secret(key, default=""):
+    try:
+        if key in st.secrets:
+            return str(st.secrets[key]).strip()
+        analytics_cfg = st.secrets.get("analytics", {})
+        if isinstance(analytics_cfg, dict) and key in analytics_cfg:
+            return str(analytics_cfg[key]).strip()
+    except Exception:
+        pass
+    return str(os.getenv(key, default)).strip()
+
+
+def _get_supabase_config():
+    url = _read_secret("SUPABASE_URL")
+    key = _read_secret("SUPABASE_SERVICE_ROLE_KEY")
+    table = _read_secret("SUPABASE_EVENTS_TABLE", "usage_events") or "usage_events"
+    if not url or not key:
+        return None
+    return {
+        "url": url.rstrip("/"),
+        "key": key,
+        "table": table,
+    }
+
+
+def _append_local_usage_event(event):
+    USAGE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(event, ensure_ascii=False)
+    with _USAGE_LOG_LOCK:
+        with open(USAGE_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+
+def _send_usage_event_to_supabase(event, config):
+    endpoint = f"{config['url']}/rest/v1/{config['table']}"
+    payload = {
+        "timestamp_utc": event.get("timestamp_utc"),
+        "event": event.get("event"),
+        "session_id": event.get("session_id"),
+        "query": event.get("query"),
+        "payload": event,
+    }
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "apikey": config["key"],
+            "Authorization": f"Bearer {config['key']}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=2.5):
+        return True
+
+
 def log_usage_event(event_type, **payload):
-    """Append a lightweight analytics event to local JSONL storage."""
+    """Log a lightweight analytics event to Supabase with local fallback."""
     if os.getenv("BGB_USAGE_LOGGING", "1").strip().lower() in {"0", "false", "no", "off"}:
         return
 
@@ -48,14 +107,19 @@ def log_usage_event(event_type, **payload):
         }
         event.update(payload)
 
-        USAGE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(event, ensure_ascii=False)
-        with _USAGE_LOG_LOCK:
-            with open(USAGE_LOG_PATH, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+        supabase_cfg = _get_supabase_config()
+        if supabase_cfg:
+            _send_usage_event_to_supabase(event, supabase_cfg)
+        elif os.getenv("BGB_USAGE_LOCAL_FALLBACK", "1").strip().lower() not in {"0", "false", "no", "off"}:
+            _append_local_usage_event(event)
     except Exception:
-        # Analytics must never break app behavior.
-        pass
+        # Fallback to local storage if Supabase isn't configured/reachable.
+        try:
+            if os.getenv("BGB_USAGE_LOCAL_FALLBACK", "1").strip().lower() not in {"0", "false", "no", "off"}:
+                _append_local_usage_event(event)
+        except Exception:
+            # Analytics must never break app behavior.
+            pass
 
 # ── Store list (mirrors the stores in BoardGame-Broke.py) ────────────────────
 STORE_LIST = [
