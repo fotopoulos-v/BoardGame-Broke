@@ -600,14 +600,17 @@ def build_results_pdf(search_term, exact_matches, partial_matches):
     # Register Unicode font to support Greek accented characters in PDF output.
     font_name = "Helvetica"
     font_name_bold = "Helvetica-Bold"
+    greek_required_chars = "έώόίάήύΈΏΌΊΆΉΎ"
     font_candidates = [
         {
             "family": "DejaVuSans",
             "regular_paths": [
+                str(pathlib.Path(__file__).parent / "assets" / "fonts" / "DejaVuSans.ttf"),
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                 "/usr/share/fonts/dejavu/DejaVuSans.ttf",
             ],
             "bold_paths": [
+                str(pathlib.Path(__file__).parent / "assets" / "fonts" / "DejaVuSans-Bold.ttf"),
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
                 "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
             ],
@@ -651,6 +654,14 @@ def build_results_pdf(search_term, exact_matches, partial_matches):
                 return candidate
         return None
 
+    def _supports_greek_tonos(registered_font_name):
+        try:
+            face = pdfmetrics.getFont(registered_font_name).face
+            char_widths = getattr(face, "charWidths", {}) or {}
+            return all(ord(ch) in char_widths for ch in greek_required_chars)
+        except Exception:
+            return False
+
     # Last-resort globbing for Linux distros with different font directory layouts.
     glob_regular_map = {
         "DejaVuSans": "/usr/share/fonts/**/DejaVuSans.ttf",
@@ -685,9 +696,11 @@ def build_results_pdf(search_term, exact_matches, partial_matches):
             regular_name = f"{family}-Regular"
             bold_name = f"{family}-Bold"
             pdfmetrics.registerFont(TTFont(regular_name, regular_path))
+            if not _supports_greek_tonos(regular_name):
+                continue
             if bold_path:
                 pdfmetrics.registerFont(TTFont(bold_name, bold_path))
-                font_name_bold = bold_name
+                font_name_bold = bold_name if _supports_greek_tonos(bold_name) else regular_name
             else:
                 font_name_bold = regular_name
 
