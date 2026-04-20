@@ -568,73 +568,124 @@ def _efantasy_request_key(query, session_id):
     inner = md5('efantasy.gr|' + sorted_params)
     return md5(inner + 'y0YIfLTE8g')
 
+
+def _parse_efantasy_storefront_html(content, game_query):
+    """Parse eFantasy storefront search HTML.
+
+    This path is cloud-safe compared to Findbar session bootstrap in hosted
+    environments.
+    """
+    if not content:
+        return []
+
+    products = []
+    seen_urls = set()
+    query_norm = normalize_for_match(_html.unescape(game_query))
+    query_words = query_norm.split()
+
+    block_starts = [m.start() for m in re.finditer(r"<div class='product product-box'", content)]
+    if not block_starts:
+        return []
+
+    for i, start in enumerate(block_starts):
+        end = block_starts[i + 1] if i + 1 < len(block_starts) else len(content)
+        block = content[start:end]
+
+        name_match = re.search(
+            r"<div class='product-title'>\s*<a[^>]*>([\s\S]+?)</a>\s*</div>",
+            block,
+            re.IGNORECASE,
+        )
+        if not name_match:
+            continue
+        name = _html.unescape(' '.join(name_match.group(1).replace('\n', ' ').split()))
+        name = re.sub(r'<[^>]+>', '', name).strip()
+        if not name:
+            continue
+
+        # Guard against manufacturer-only matches (same logic as UI-side filter).
+        if not _query_words_in_text(query_words, eFantasy_match_text(name)):
+            continue
+
+        url_match = re.search(
+            r"<div class='product-title'>\s*<a href='([^']+)'",
+            block,
+            re.IGNORECASE,
+        )
+        if not url_match:
+            continue
+        url = _html.unescape(url_match.group(1).strip())
+        if url.startswith('/'):
+            url = f"https://www.efantasy.gr{url}"
+
+        # Keep only board-game category products.
+        if "/el/προϊόντα/επιτραπέζια-παιχνίδια/" not in url:
+            continue
+
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+
+        price_match = re.search(r"<strong>(\d+[\.,]\d{2})€</strong>", block, re.IGNORECASE)
+        if not price_match:
+            continue
+        try:
+            price = float(price_match.group(1).replace(',', '.'))
+        except ValueError:
+            continue
+
+        if "data-label='preorder'" in block or re.search(r'Διαθέσιμα:\s*Προπαραγγελία', block, re.IGNORECASE):
+            in_stock = False
+        else:
+            stock_match = re.search(r'Διαθέσιμα:\s*(\d+)\+?', block, re.IGNORECASE)
+            if stock_match:
+                in_stock = int(stock_match.group(1)) > 0
+            else:
+                # Conservative default when stock text is missing.
+                in_stock = False
+
+        products.append({
+            "name": name,
+            "price": price,
+            "is_in_stock": in_stock,
+            "url": url,
+        })
+
+    return products
+
 def search_efantasy(game_query):
-    """Search eFantasy directly via Findbar API"""
+    """Search eFantasy via storefront HTML endpoints (cloud-safe)."""
     import requests as _requests
-    from config import EFANTASY_SESSION_ID
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0",
-        "Accept": "*/*",
-        "Accept-Language": "el-GR,el;q=0.9",
-        "Origin": "https://www.efantasy.gr",
-        "Referer": "https://www.efantasy.gr/",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "cross-site",
-        "Cache-Control": "no-cache",
+        "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:149.0) Gecko/20100101 Firefox/149.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "el-GR,el;q=0.9,en;q=0.8",
     }
 
-    # Try to get session_id — first from config/secrets, then by requesting one
-    session_id = ""
+    query_encoded = urllib.parse.quote_plus(game_query)
+    candidate_urls = [
+        f"https://www.efantasy.gr/el/προϊόντα/αναζήτηση={query_encoded}",
+        f"https://www.efantasy.gr/el/αναζήτηση?search={query_encoded}",
+    ]
 
-    # Check Streamlit secrets first (for cloud deployment)
-    try:
-        import streamlit as st
-        session_id = st.secrets.get("EFANTASY_SESSION_ID", "")
-    except Exception:
-        pass
-
-    # Fall back to config.py (for local deployment)
-    if not session_id:
-        session_id = EFANTASY_SESSION_ID
-
-    # Last resort: try to get one from Findbar directly
-    if not session_id:
+    best_products = []
+    for url in candidate_urls:
         try:
-            r0 = _requests.get(
-                "https://app.findbar.io/search/efantasy.gr/full",
-                params={"αναζήτηση": game_query, "initial_request": "1"},
-                headers=headers,
-                timeout=15
-            )
-            session_id = r0.headers.get('x-session-id', '')
+            response = _requests.get(url, headers=headers, timeout=20)
         except Exception:
-            pass
+            continue
 
-    if not session_id:
-        return []
+        if response.status_code != 200:
+            continue
 
-    # Generate request_key and search
-    request_key = _efantasy_request_key(game_query, session_id)
-    try:
-        params = {
-            "αναζήτηση": game_query,
-            "initial_request": "1",
-            "session_id": session_id,
-            "request_key": request_key,
-        }
-        r = _requests.get(
-            "https://app.findbar.io/search/efantasy.gr/full",
-            params=params,
-            headers=headers,
-            timeout=15
-        )
-        if r.status_code != 200:
-            return []
-        return parse_efantasy_html(r.text, game_query)
-    except Exception:
-        return []
+        products = _parse_efantasy_storefront_html(response.text or "", game_query)
+        if len(products) > len(best_products):
+            best_products = products
+        if products:
+            return products
+
+    return best_products
 
 
 
