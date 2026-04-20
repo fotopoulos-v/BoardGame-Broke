@@ -1384,6 +1384,20 @@ with results_panel.container():
         m3.metric("🔍 Partial Matches", len(partial_matches))
         m4.metric("💰 Best Price", best_price_str)
 
+        # Temporary eFantasy diagnostics: progress placeholders are cleared,
+        # so surface debug info in the persistent results panel.
+        ef_debug = store_stats.get("eFantasy", {}).get("debug", {})
+        if ef_debug:
+            st.info(
+                "eFantasy debug: "
+                f"source={ef_debug.get('session_source', 'n/a')} | "
+                f"status={ef_debug.get('status', 'n/a')} | "
+                f"body={ef_debug.get('body_len', 'n/a')} | "
+                f"blocks={ef_debug.get('result_blocks', 'n/a')} | "
+                f"parsed={ef_debug.get('parsed_count', 'n/a')} | "
+                f"error={ef_debug.get('error', '')}"
+            )
+
         # ── Single export action for all results ─────────────────────────────────
         pdf_bytes = build_results_pdf(st.session_state.query, exact_matches, partial_matches)
         if pdf_bytes:
