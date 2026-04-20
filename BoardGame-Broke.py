@@ -606,92 +606,97 @@ def _efantasy_request_key(query, session_id):
 #         return []
 
 def search_efantasy(game_query):
-    import requests as _requests
-    from config import EFANTASY_SESSION_ID
-    import time
-
-    BASE_URL = "https://app.findbar.io/search/efantasy.gr/full"
+    import requests
+    import re
+    import html as _html
+    import urllib.parse
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:149.0) Gecko/20100101 Firefox/149.0",
-        "Accept": "*/*",
-        "Accept-Language": "el-GR,el;q=0.9",
-        "Origin": "https://www.efantasy.gr",
-        "Referer": "https://www.efantasy.gr/",
-        "Cache-Control": "no-cache",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+        "Accept-Language": "el-GR,el;q=0.9,en;q=0.8",
     }
 
-    def _do_request(query, session_id):
-        request_key = _efantasy_request_key(query, session_id)
-
-        try:
-            r = _requests.get(
-                BASE_URL,
-                params={
-                    "αναζήτηση": query,
-                    "initial_request": "1",
-                    "session_id": session_id,
-                    "request_key": request_key,
-                },
-                headers=headers,
-                timeout=15,
-            )
-
-            if r.status_code != 200:
-                return []
-
-            return parse_efantasy_html(r.text, query)
-
-        except Exception:
-            return []
-
-    # ─────────────────────────────────────────────
-    # STEP 1: try existing session (secrets/config)
-    # ─────────────────────────────────────────────
-    session_id = ""
+    search_url = (
+        "https://www.efantasy.gr/el/αναζήτηση?"
+        f"search={urllib.parse.quote_plus(game_query)}"
+    )
 
     try:
-        import streamlit as st
-        session_id = st.secrets.get("EFANTASY_SESSION_ID", "")
-    except Exception:
-        pass
-
-    if not session_id:
-        session_id = EFANTASY_SESSION_ID
-
-    if session_id:
-        results = _do_request(game_query, session_id)
-        if results:
-            return results
-
-    # ─────────────────────────────────────────────
-    # STEP 2: force new session via valid flow
-    # ─────────────────────────────────────────────
-    try:
-        r0 = _requests.get(
-            BASE_URL,
-            params={
-                "αναζήτηση": game_query,
-                "initial_request": "1",
-            },
-            headers=headers,
-            timeout=15,
-        )
-
-        new_session = r0.headers.get("x-session-id", "")
-
-        if not new_session:
+        r = requests.get(search_url, headers=headers, timeout=15)
+        if r.status_code != 200:
             return []
-
-        # IMPORTANT: small delay (Findbar sometimes needs it)
-        time.sleep(0.3)
-
-        results = _do_request(game_query, new_session)
-
-        return results
-
     except Exception:
         return []
+
+    content = r.text
+
+    products = []
+    seen_urls = set()
+
+    # Split product blocks
+    blocks = re.split(r'<div class="product-item', content)
+
+    for block in blocks:
+        # NAME
+        name_match = re.search(
+            r'<a[^>]*class="product-title"[^>]*>(.*?)</a>',
+            block,
+            re.DOTALL | re.IGNORECASE
+        )
+        if not name_match:
+            continue
+
+        name = _html.unescape(
+            ' '.join(name_match.group(1).replace('\n', ' ').split())
+        )
+
+        # FILTER: keep board games only
+        if "επιτραπέζια-παιχνίδια" not in block:
+            continue
+
+        # URL
+        url_match = re.search(
+            r'href="(https://www\.efantasy\.gr/[^"]+)"',
+            block
+        )
+        if not url_match:
+            continue
+
+        url = url_match.group(1)
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+
+        # PRICE
+        price_match = re.search(r'(\d+[.,]\d+)\s*€', block)
+        if not price_match:
+            continue
+
+        try:
+            price = float(price_match.group(1).replace(',', '.'))
+        except:
+            continue
+
+        # STOCK
+        if "Προπαραγγελία" in block:
+            in_stock = False
+        elif re.search(r'Διαθέσιμα:\s*(\d+)', block):
+            in_stock = True
+        else:
+            in_stock = True  # fallback
+
+        # MATCH query (important for noise)
+        if game_query.lower() not in name.lower():
+            continue
+
+        products.append({
+            "name": name,
+            "price": price,
+            "is_in_stock": in_stock,
+            "url": url
+        })
+
+    return products
 
 
 
