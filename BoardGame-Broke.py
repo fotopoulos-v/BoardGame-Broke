@@ -14,6 +14,9 @@ APOSTROPHE_VARIANTS = ['\'', '’', '`', '´', '‘', '′', '＇', '᾽', '᾿'
 # Dash variants that should be treated as separators for retry logic
 DASH_VARIANTS = ['-', '‐', '–', '—']
 
+# Last eFantasy diagnostics snapshot, used by app UI when cloud logs are unavailable.
+EF_DEBUG_LAST = {}
+
 
 def strip_dash_variants(query):
     """Replace dash variants with spaces and collapse whitespace."""
@@ -550,6 +553,7 @@ def search_efantasy(game_query):
     """Search eFantasy directly via Findbar API"""
     import requests as _requests
     from config import EFANTASY_SESSION_ID
+    global EF_DEBUG_LAST
 
     def _mask(value):
         if not value:
@@ -573,6 +577,19 @@ def search_efantasy(game_query):
     # Try to get session_id — first from config/secrets, then by requesting one
     session_id = ""
     session_source = "none"
+    EF_DEBUG_LAST = {
+        "query": game_query,
+        "session_source": "none",
+        "session_id": "<empty>",
+        "request_key": "<empty>",
+        "status": None,
+        "body_len": 0,
+        "result_blocks": 0,
+        "parsed_count": 0,
+        "x_session_id": "<empty>",
+        "final_url": "",
+        "error": "",
+    }
 
     # Check Streamlit secrets first (for cloud deployment)
     try:
@@ -611,16 +628,20 @@ def search_efantasy(game_query):
 
     if not session_id:
         print(f"[EF_DEBUG][search] no session_id for query='{game_query}'")
+        EF_DEBUG_LAST["error"] = "no_session_id"
         return []
 
     print(
         f"[EF_DEBUG][search] query='{game_query}' "
         f"session_source={session_source} session_id={_mask(session_id)}"
     )
+    EF_DEBUG_LAST["session_source"] = session_source
+    EF_DEBUG_LAST["session_id"] = _mask(session_id)
 
     # Generate request_key and search
     request_key = _efantasy_request_key(game_query, session_id)
     print(f"[EF_DEBUG][search] request_key={_mask(request_key)}")
+    EF_DEBUG_LAST["request_key"] = _mask(request_key)
     try:
         params = {
             "αναζήτηση": game_query,
@@ -641,13 +662,21 @@ def search_efantasy(game_query):
             f"x_session_id={_mask(x_sid)} result_blocks={block_count} "
             f"final_url={r.url}"
         )
+        EF_DEBUG_LAST["status"] = r.status_code
+        EF_DEBUG_LAST["body_len"] = len(r.text or "")
+        EF_DEBUG_LAST["result_blocks"] = block_count
+        EF_DEBUG_LAST["x_session_id"] = _mask(x_sid)
+        EF_DEBUG_LAST["final_url"] = r.url
         if r.status_code != 200:
+            EF_DEBUG_LAST["error"] = f"http_{r.status_code}"
             return []
         parsed = parse_efantasy_html(r.text, game_query)
         print(f"[EF_DEBUG][search] parsed_count={len(parsed)} query='{game_query}'")
+        EF_DEBUG_LAST["parsed_count"] = len(parsed)
         return parsed
     except Exception:
         print(f"[EF_DEBUG][search] exception during request for query='{game_query}'")
+        EF_DEBUG_LAST["error"] = "request_exception"
         return []
 
 

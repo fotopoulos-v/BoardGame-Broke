@@ -1087,6 +1087,7 @@ if run_search and current_query:
 
                 # ── Direct request-backed stores ───────────────────────────────
                 if store_name in ["eFantasy", "Public", "RollnPlay", "Meeple Planet", "Crystal Lotus", "Gaming Galaxy", "The Dragonphoenix Inn"]:
+                    ef_debug = {}
                     if store_name == "eFantasy":
                         fetch_func = _m.search_efantasy
                     elif store_name == "RollnPlay":
@@ -1103,6 +1104,8 @@ if run_search and current_query:
                         fetch_func = _m.search_public
                     try:
                         raw_products = fetch_func(game_query)
+                        if store_name == "eFantasy":
+                            ef_debug = dict(getattr(_m, "EF_DEBUG_LAST", {}) or {})
                     except Exception as e:
                         return False, str(e)
 
@@ -1132,6 +1135,8 @@ if run_search and current_query:
                         if query_no_dash and query_no_dash != game_query:
                             try:
                                 retry_products = fetch_func(query_no_dash)
+                                if store_name == "eFantasy":
+                                    ef_debug = dict(getattr(_m, "EF_DEBUG_LAST", {}) or {})
                             except Exception:
                                 retry_products = []
                             a, e = add_products(retry_products, query_no_dash, seen_urls_in_store)
@@ -1139,6 +1144,8 @@ if run_search and current_query:
                             exact_count += e
 
                     combined_data["store_stats"][store_name] = {"total": valid_store_count, "exact": exact_count}
+                    if store_name == "eFantasy" and ef_debug:
+                        combined_data["store_stats"][store_name]["debug"] = ef_debug
                 else:
                     use_html_fallback = store_name in [
                         "The Game Rules", "epitrapez.io", "Boards of Madness",
@@ -1226,9 +1233,19 @@ if run_search and current_query:
                             unsafe_allow_html=True,
                         )
                     else:
+                        ef_debug_note = ""
+                        if store_name == "eFantasy":
+                            ef_debug = combined_data.get("store_stats", {}).get(store_name, {}).get("debug", {})
+                            if ef_debug:
+                                ef_debug_note = (
+                                    f"<br><small>[EF_DEBUG_UI] source={ef_debug.get('session_source', 'n/a')} "
+                                    f"status={ef_debug.get('status', 'n/a')} body={ef_debug.get('body_len', 'n/a')} "
+                                    f"blocks={ef_debug.get('result_blocks', 'n/a')} parsed={ef_debug.get('parsed_count', 'n/a')} "
+                                    f"error={ef_debug.get('error', '')}</small>"
+                                )
                         ph.markdown(
                             f"<div class='progress-store progress-store-done'>"
-                            f"✅ <strong>{store_name}</strong> — 0 results</div>",
+                            f"✅ <strong>{store_name}</strong> — 0 results{ef_debug_note}</div>",
                             unsafe_allow_html=True,
                         )
 
