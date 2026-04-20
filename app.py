@@ -4,7 +4,10 @@ import sys
 import os
 import base64
 import glob
+import json
+import threading
 import unicodedata
+import uuid
 from io import BytesIO
 from datetime import datetime
 from xml.sax.saxutils import escape
@@ -25,6 +28,34 @@ _spec = importlib.util.spec_from_file_location("boardgame_broke", _mod_path)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 search_game_structured = _mod.search_game_structured
+
+# ── Anonymous usage analytics (local JSONL, no third-party) ─────────────────
+USAGE_LOG_PATH = pathlib.Path(__file__).parent / "data" / "usage_events.jsonl"
+_USAGE_LOG_LOCK = threading.Lock()
+
+
+def log_usage_event(event_type, **payload):
+    """Append a lightweight analytics event to local JSONL storage."""
+    if os.getenv("BGB_USAGE_LOGGING", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return
+
+    try:
+        session_id = st.session_state.get("anon_session_id", "unknown")
+        event = {
+            "timestamp_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "event": str(event_type),
+            "session_id": str(session_id),
+        }
+        event.update(payload)
+
+        USAGE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(event, ensure_ascii=False)
+        with _USAGE_LOG_LOCK:
+            with open(USAGE_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except Exception:
+        # Analytics must never break app behavior.
+        pass
 
 # ── Store list (mirrors the stores in BoardGame-Broke.py) ────────────────────
 STORE_LIST = [
@@ -414,9 +445,21 @@ for key, default in [
     ("trigger_search", False),
     ("show_stores", False),
     ("selected_stores", [s["name"] for s in STORE_LIST]),
+    ("anon_session_id", ""),
+    ("session_started_logged", False),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
+
+if not st.session_state.anon_session_id:
+    st.session_state.anon_session_id = uuid.uuid4().hex
+
+if not st.session_state.session_started_logged:
+    log_usage_event(
+        "session_started",
+        selected_store_count=len(st.session_state.selected_stores),
+    )
+    st.session_state.session_started_logged = True
 
 
 def _set_selected_stores(store_names):
@@ -977,9 +1020,22 @@ if run_search and current_query:
 
     # Use the persistent selection so hidden widgets do not reset the search scope
     active_stores = st.session_state.selected_stores.copy()
+    search_start_ts = datetime.utcnow()
+
+    log_usage_event(
+        "search_submitted",
+        query=current_query,
+        selected_stores=active_stores,
+        selected_store_count=len(active_stores),
+    )
 
     if not active_stores:
         st.warning("⚠️ No stores selected. Please tick at least one store in **Stores to Search**.")
+        log_usage_event(
+            "search_failed",
+            query=current_query,
+            reason="no_stores_selected",
+        )
 
 
     else:
@@ -1440,6 +1496,29 @@ if run_search and current_query:
         st.session_state.results = results
         st.session_state.search_in_progress = False
 
+        duration_ms = int((datetime.utcnow() - search_start_ts).total_seconds() * 1000)
+        store_stats = results.get("store_stats", {}) if isinstance(results, dict) else {}
+        error_stores = [store for store, stats in store_stats.items() if isinstance(stats, dict) and "error" in stats]
+        exact_count = len(results.get("exact_matches", [])) if isinstance(results, dict) else 0
+        all_count = len(results.get("all_results", [])) if isinstance(results, dict) else 0
+
+        log_usage_event(
+            "search_completed",
+            query=current_query,
+            duration_ms=duration_ms,
+            exact_match_count=exact_count,
+            total_result_count=all_count,
+            store_error_count=len(error_stores),
+        )
+
+        if error_stores:
+            log_usage_event(
+                "search_errors",
+                query=current_query,
+                stores=error_stores,
+                count=len(error_stores),
+            )
+
 
 # ── Display results ───────────────────────────────────────────────────────────
 if not st.session_state.get("search_in_progress", False):
@@ -1479,13 +1558,20 @@ with results_panel.container():
         # ── Single export action for all results ─────────────────────────────────
         pdf_bytes = build_results_pdf(st.session_state.query, exact_matches, partial_matches)
         if pdf_bytes:
-            st.download_button(
+            pdf_clicked = st.download_button(
                 "📄 Download PDF Results",
                 data=pdf_bytes,
                 file_name=f"boardgame-broke-{st.session_state.query.strip().replace(' ', '-')}.pdf",
                 mime="application/pdf",
                 use_container_width=False,
             )
+            if pdf_clicked:
+                log_usage_event(
+                    "pdf_download_clicked",
+                    query=st.session_state.query,
+                    exact_match_count=len(exact_matches),
+                    partial_match_count=len(partial_matches),
+                )
         else:
             st.warning("PDF export requires the `reportlab` package.")
 
