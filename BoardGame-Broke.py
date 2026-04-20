@@ -428,6 +428,7 @@ def sanitize_public_name(raw_name):
 def parse_efantasy_html(content, game_query):
     """HTML parser for eFantasy - parses Findbar API response"""
     if not content:
+        print(f"[EF_DEBUG][parse] empty content for query='{game_query}'")
         return []
     products = []
     seen_urls = set()
@@ -437,7 +438,14 @@ def parse_efantasy_html(content, game_query):
         r'<div class="fbr-result-container', content
     )]
 
+    print(
+        f"[EF_DEBUG][parse] query='{game_query}' content_len={len(content)} "
+        f"block_starts={len(block_starts)}"
+    )
+
     if not block_starts:
+        preview = content[:220].replace("\n", " ")
+        print(f"[EF_DEBUG][parse] no result blocks. preview='{preview}'")
         return []
 
     blocks = []
@@ -512,6 +520,7 @@ def parse_efantasy_html(content, game_query):
             'url': url
         })
 
+    print(f"[EF_DEBUG][parse] parsed_products={len(products)} query='{game_query}'")
     return products
 
 # ------ efantasy.gr SECTION ------- #
@@ -542,6 +551,13 @@ def search_efantasy(game_query):
     import requests as _requests
     from config import EFANTASY_SESSION_ID
 
+    def _mask(value):
+        if not value:
+            return "<empty>"
+        if len(value) <= 8:
+            return value
+        return f"{value[:4]}...{value[-4:]}"
+
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0",
         "Accept": "*/*",
@@ -556,17 +572,22 @@ def search_efantasy(game_query):
 
     # Try to get session_id — first from config/secrets, then by requesting one
     session_id = ""
+    session_source = "none"
 
     # Check Streamlit secrets first (for cloud deployment)
     try:
         import streamlit as st
         session_id = st.secrets.get("EFANTASY_SESSION_ID", "")
+        if session_id:
+            session_source = "streamlit_secret"
     except Exception:
         pass
 
     # Fall back to config.py (for local deployment)
     if not session_id:
         session_id = EFANTASY_SESSION_ID
+        if session_id:
+            session_source = "config_py"
 
     # Last resort: try to get one from Findbar directly
     if not session_id:
@@ -578,31 +599,55 @@ def search_efantasy(game_query):
                 timeout=15
             )
             session_id = r0.headers.get('x-session-id', '')
+            if session_id:
+                session_source = "findbar_header"
+            print(
+                f"[EF_DEBUG][session_bootstrap] status={r0.status_code} "
+                f"x_session_id={_mask(session_id)} body_len={len(r0.text or '')}"
+            )
         except Exception:
+            print("[EF_DEBUG][session_bootstrap] exception while requesting fallback session_id")
             pass
 
     if not session_id:
+        print(f"[EF_DEBUG][search] no session_id for query='{game_query}'")
         return []
-    print("SESSION ID USED:", session_id)
+
+    print(
+        f"[EF_DEBUG][search] query='{game_query}' "
+        f"session_source={session_source} session_id={_mask(session_id)}"
+    )
+
     # Generate request_key and search
     request_key = _efantasy_request_key(game_query, session_id)
-    print("request key USED:", request_key)
+    print(f"[EF_DEBUG][search] request_key={_mask(request_key)}")
     try:
+        params = {
+            "αναζήτηση": game_query,
+            "initial_request": "1",
+            "session_id": session_id,
+            "request_key": request_key,
+        }
         r = _requests.get(
             "https://app.findbar.io/search/efantasy.gr/full",
-            params={
-                "αναζήτηση": game_query,
-                "initial_request": "1",
-                "session_id": session_id,
-                "request_key": request_key,
-            },
+            params=params,
             headers=headers,
             timeout=15
         )
+        x_sid = r.headers.get("x-session-id", "")
+        block_count = len(re.findall(r'<div class="fbr-result-container', r.text or ""))
+        print(
+            f"[EF_DEBUG][response] status={r.status_code} body_len={len(r.text or '')} "
+            f"x_session_id={_mask(x_sid)} result_blocks={block_count} "
+            f"final_url={r.url}"
+        )
         if r.status_code != 200:
             return []
-        return parse_efantasy_html(r.text, game_query)
+        parsed = parse_efantasy_html(r.text, game_query)
+        print(f"[EF_DEBUG][search] parsed_count={len(parsed)} query='{game_query}'")
+        return parsed
     except Exception:
+        print(f"[EF_DEBUG][search] exception during request for query='{game_query}'")
         return []
 
 
