@@ -3,7 +3,7 @@ __pycache__/
 .env
 venv/
 .env/
-
+*.sql
 
 test_data.html
 
@@ -14,3 +14,6 @@ temp/
 packages.txt
 
 .streamlit/
+
+supabase_usage_events.sql
+usage_events_rows.csv

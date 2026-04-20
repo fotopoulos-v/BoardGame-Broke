@@ -108,14 +108,10 @@ BGB_USAGE_LOCAL_FALLBACK = "1"
 
 ### 4) What gets logged
 
-- `session_started`
-- `search_submitted`
-- `search_completed`
-- `search_errors`
-- `search_failed`
-- `pdf_download_clicked`
-
-All events include timestamp, anonymous session ID, and event payload.
+- One event per search action: `search`
+- `status` is `completed` or `failed`
+- Includes timestamp, anonymous session ID, query, and summary fields
+  (duration, results, error count, selected store count).
 
 ---
 
