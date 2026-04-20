@@ -3,8 +3,10 @@ import importlib
 import sys
 import os
 import base64
+import unicodedata
 from io import BytesIO
 from datetime import datetime
+from xml.sax.saxutils import escape
 # os.system("playwright install chromium")
 
 # ── Page config (must be first Streamlit call) ──────────────────────────────
@@ -589,6 +591,7 @@ def build_results_pdf(search_term, exact_matches, partial_matches):
         from reportlab.lib.units import cm
         from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
         from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.pdfmetrics import registerFontFamily
         from reportlab.pdfbase.ttfonts import TTFont
     except Exception:
         return None
@@ -611,9 +614,17 @@ def build_results_pdf(search_term, exact_matches, partial_matches):
                 else:
                     font_name_bold = regular_name
                 font_name = regular_name
+                registerFontFamily(font_name, normal=font_name, bold=font_name_bold)
                 break
             except Exception:
                 continue
+
+    def _pdf_text(value):
+        # Normalize to NFC so Greek accented letters are emitted as precomposed glyphs.
+        return unicodedata.normalize("NFC", str(value or ""))
+
+    def _pdf_paragraph_text(value):
+        return escape(_pdf_text(value))
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(
@@ -669,7 +680,7 @@ def build_results_pdf(search_term, exact_matches, partial_matches):
             f"Search term:",
             subtitle_style,
         ),
-        Paragraph(search_term, search_term_style),
+        Paragraph(_pdf_paragraph_text(search_term), search_term_style),
         Paragraph(
             f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
             subtitle_style,
@@ -692,16 +703,16 @@ def build_results_pdf(search_term, exact_matches, partial_matches):
         ]]
 
         for item in items:
-            stock_text = "In Stock" if item.get("in_stock") else "Out of Stock"
-            url = item.get("url", "")
+            stock_text = _pdf_text("In Stock" if item.get("in_stock") else "Out of Stock")
+            url = _pdf_text(item.get("url", ""))
             price_value = item.get('price', '')
             price_cell = "N/A" if str(price_value).strip().upper() == "N/A" else f"€ {price_value}"
-            link_cell = Paragraph(f"<link href='{url}'>View</link>", link_style) if url else Paragraph("-", body_style)
+            link_cell = Paragraph(f"<link href='{escape(url, {'\"': '&quot;', "'": '&#39;'})}'>View</link>", link_style) if url else Paragraph("-", body_style)
             table_data.append([
-                Paragraph(str(item.get("name", "")), body_style),
-                Paragraph(str(item.get("store", "")), body_style),
-                Paragraph(price_cell, body_style),
-                Paragraph(stock_text, body_style),
+                Paragraph(_pdf_paragraph_text(item.get("name", "")), body_style),
+                Paragraph(_pdf_paragraph_text(item.get("store", "")), body_style),
+                Paragraph(_pdf_paragraph_text(price_cell), body_style),
+                Paragraph(_pdf_paragraph_text(stock_text), body_style),
                 link_cell,
             ])
 
