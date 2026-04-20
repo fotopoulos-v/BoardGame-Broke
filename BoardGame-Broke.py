@@ -14,9 +14,6 @@ APOSTROPHE_VARIANTS = ['\'', '’', '`', '´', '‘', '′', '＇', '᾽', '᾿'
 # Dash variants that should be treated as separators for retry logic
 DASH_VARIANTS = ['-', '‐', '–', '—']
 
-# Last eFantasy diagnostics snapshot, used by app UI when cloud logs are unavailable.
-EF_DEBUG_LAST = {}
-
 
 def strip_dash_variants(query):
     """Replace dash variants with spaces and collapse whitespace."""
@@ -419,6 +416,37 @@ def sanitize_efantasy_name(raw_name):
             name = name[len(prefix):].strip()
     return ' '.join(name.split()).strip()
 
+
+def eFantasy_match_text(raw_name):
+    """Build a stricter eFantasy title string for query matching.
+
+    Some eFantasy listings can include manufacturer/publisher snippets inside
+    the title text. We strip common publisher-only suffix patterns so queries
+    don't match only by publisher name.
+    """
+    if not raw_name:
+        return ""
+
+    text = _html.unescape(str(raw_name)).strip()
+
+    # Remove parenthetical or bracketed publisher snippets.
+    text = re.sub(
+        r'\s*[\[(](?:[^\])]*\b(?:games?|studio|studios|publishing|publisher)\b[^\])]*?)[\])]\s*$',
+        '',
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # Remove trailing "by <publisher>" / "από <publisher>" publisher-only tails.
+    text = re.sub(
+        r'\s*[-–—]?\s*(?:by|από)\s+[^\-–—]*\b(?:games?|studio|studios|publishing|publisher)\b\s*$',
+        '',
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    return normalize_for_match(text)
+
 def sanitize_public_name(raw_name):
     """Normalize Public titles by stripping trailing 'Επιτραπέζιο (Brand)' suffix."""
     if not raw_name:
@@ -431,7 +459,6 @@ def sanitize_public_name(raw_name):
 def parse_efantasy_html(content, game_query):
     """HTML parser for eFantasy - parses Findbar API response"""
     if not content:
-        print(f"[EF_DEBUG][parse] empty content for query='{game_query}'")
         return []
     products = []
     seen_urls = set()
@@ -441,14 +468,7 @@ def parse_efantasy_html(content, game_query):
         r'<div class="fbr-result-container', content
     )]
 
-    print(
-        f"[EF_DEBUG][parse] query='{game_query}' content_len={len(content)} "
-        f"block_starts={len(block_starts)}"
-    )
-
     if not block_starts:
-        preview = content[:220].replace("\n", " ")
-        print(f"[EF_DEBUG][parse] no result blocks. preview='{preview}'")
         return []
 
     blocks = []
@@ -523,7 +543,6 @@ def parse_efantasy_html(content, game_query):
             'url': url
         })
 
-    print(f"[EF_DEBUG][parse] parsed_products={len(products)} query='{game_query}'")
     return products
 
 # ------ efantasy.gr SECTION ------- #
@@ -553,14 +572,6 @@ def search_efantasy(game_query):
     """Search eFantasy directly via Findbar API"""
     import requests as _requests
     from config import EFANTASY_SESSION_ID
-    global EF_DEBUG_LAST
-
-    def _mask(value):
-        if not value:
-            return "<empty>"
-        if len(value) <= 8:
-            return value
-        return f"{value[:4]}...{value[-4:]}"
 
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0",
@@ -576,35 +587,17 @@ def search_efantasy(game_query):
 
     # Try to get session_id — first from config/secrets, then by requesting one
     session_id = ""
-    session_source = "none"
-    EF_DEBUG_LAST = {
-        "query": game_query,
-        "session_source": "none",
-        "session_id": "<empty>",
-        "request_key": "<empty>",
-        "status": None,
-        "body_len": 0,
-        "result_blocks": 0,
-        "parsed_count": 0,
-        "x_session_id": "<empty>",
-        "final_url": "",
-        "error": "",
-    }
 
     # Check Streamlit secrets first (for cloud deployment)
     try:
         import streamlit as st
         session_id = st.secrets.get("EFANTASY_SESSION_ID", "")
-        if session_id:
-            session_source = "streamlit_secret"
     except Exception:
         pass
 
     # Fall back to config.py (for local deployment)
     if not session_id:
         session_id = EFANTASY_SESSION_ID
-        if session_id:
-            session_source = "config_py"
 
     # Last resort: try to get one from Findbar directly
     if not session_id:
@@ -616,32 +609,14 @@ def search_efantasy(game_query):
                 timeout=15
             )
             session_id = r0.headers.get('x-session-id', '')
-            if session_id:
-                session_source = "findbar_header"
-            print(
-                f"[EF_DEBUG][session_bootstrap] status={r0.status_code} "
-                f"x_session_id={_mask(session_id)} body_len={len(r0.text or '')}"
-            )
         except Exception:
-            print("[EF_DEBUG][session_bootstrap] exception while requesting fallback session_id")
             pass
 
     if not session_id:
-        print(f"[EF_DEBUG][search] no session_id for query='{game_query}'")
-        EF_DEBUG_LAST["error"] = "no_session_id"
         return []
-
-    print(
-        f"[EF_DEBUG][search] query='{game_query}' "
-        f"session_source={session_source} session_id={_mask(session_id)}"
-    )
-    EF_DEBUG_LAST["session_source"] = session_source
-    EF_DEBUG_LAST["session_id"] = _mask(session_id)
 
     # Generate request_key and search
     request_key = _efantasy_request_key(game_query, session_id)
-    print(f"[EF_DEBUG][search] request_key={_mask(request_key)}")
-    EF_DEBUG_LAST["request_key"] = _mask(request_key)
     try:
         params = {
             "αναζήτηση": game_query,
@@ -655,28 +630,10 @@ def search_efantasy(game_query):
             headers=headers,
             timeout=15
         )
-        x_sid = r.headers.get("x-session-id", "")
-        block_count = len(re.findall(r'<div class="fbr-result-container', r.text or ""))
-        print(
-            f"[EF_DEBUG][response] status={r.status_code} body_len={len(r.text or '')} "
-            f"x_session_id={_mask(x_sid)} result_blocks={block_count} "
-            f"final_url={r.url}"
-        )
-        EF_DEBUG_LAST["status"] = r.status_code
-        EF_DEBUG_LAST["body_len"] = len(r.text or "")
-        EF_DEBUG_LAST["result_blocks"] = block_count
-        EF_DEBUG_LAST["x_session_id"] = _mask(x_sid)
-        EF_DEBUG_LAST["final_url"] = r.url
         if r.status_code != 200:
-            EF_DEBUG_LAST["error"] = f"http_{r.status_code}"
             return []
-        parsed = parse_efantasy_html(r.text, game_query)
-        print(f"[EF_DEBUG][search] parsed_count={len(parsed)} query='{game_query}'")
-        EF_DEBUG_LAST["parsed_count"] = len(parsed)
-        return parsed
+        return parse_efantasy_html(r.text, game_query)
     except Exception:
-        print(f"[EF_DEBUG][search] exception during request for query='{game_query}'")
-        EF_DEBUG_LAST["error"] = "request_exception"
         return []
 
 
