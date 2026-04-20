@@ -2054,12 +2054,12 @@ def parse_crystallotus_html(content, game_query):
         in_stock = has_add_to_cart and not is_oos
 
         sale_match = re.search(
-            r'price-item--sale[\s\S]*?<span[^>]*price__prefix[^>]*>€</span>\s*([0-9]+)\s*(?:<sup[^>]*>([,\.]?[0-9]{2})</sup>)?',
+            r'price-item--sale[\s\S]*?<bdi>\s*€([0-9]+)(?:[,\.]([0-9]{2}))?\s*</bdi>',
             block,
             re.IGNORECASE,
         )
         regular_match = re.search(
-            r'price-item--regular[\s\S]*?<span[^>]*price__prefix[^>]*>€</span>\s*([0-9]+)\s*(?:<sup[^>]*>([,\.]?[0-9]{2})</sup>)?',
+            r'price-item--regular[\s\S]*?<bdi>\s*€([0-9]+)(?:[,\.]([0-9]{2}))?\s*</bdi>',
             block,
             re.IGNORECASE,
         )
