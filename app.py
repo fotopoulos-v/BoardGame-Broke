@@ -3,6 +3,7 @@ import importlib
 import sys
 import os
 import base64
+import glob
 import unicodedata
 from io import BytesIO
 from datetime import datetime
@@ -600,24 +601,101 @@ def build_results_pdf(search_term, exact_matches, partial_matches):
     font_name = "Helvetica"
     font_name_bold = "Helvetica-Bold"
     font_candidates = [
-        ("DejaVuSans", "DejaVuSans-Bold", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-        ("NotoSans", "NotoSans-Bold", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"),
+        {
+            "family": "DejaVuSans",
+            "regular_paths": [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            ],
+            "bold_paths": [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+            ],
+        },
+        {
+            "family": "LiberationSans",
+            "regular_paths": [
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            ],
+            "bold_paths": [
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            ],
+        },
+        {
+            "family": "FreeSans",
+            "regular_paths": [
+                "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+            ],
+            "bold_paths": [
+                "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+            ],
+        },
+        {
+            "family": "NotoSans",
+            "regular_paths": [
+                "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
+            ],
+            "bold_paths": [
+                "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+                "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf",
+            ],
+        },
     ]
 
-    for regular_name, bold_name, regular_path, bold_path in font_candidates:
-        if os.path.exists(regular_path):
-            try:
-                pdfmetrics.registerFont(TTFont(regular_name, regular_path))
-                if os.path.exists(bold_path):
-                    pdfmetrics.registerFont(TTFont(bold_name, bold_path))
-                    font_name_bold = bold_name
-                else:
-                    font_name_bold = regular_name
-                font_name = regular_name
-                registerFontFamily(font_name, normal=font_name, bold=font_name_bold)
-                break
-            except Exception:
-                continue
+    def _first_existing(paths):
+        for candidate in paths:
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    # Last-resort globbing for Linux distros with different font directory layouts.
+    glob_regular_map = {
+        "DejaVuSans": "/usr/share/fonts/**/DejaVuSans.ttf",
+        "LiberationSans": "/usr/share/fonts/**/LiberationSans-Regular.ttf",
+        "FreeSans": "/usr/share/fonts/**/FreeSans.ttf",
+        "NotoSans": "/usr/share/fonts/**/NotoSans-Regular.ttf",
+    }
+    glob_bold_map = {
+        "DejaVuSans": "/usr/share/fonts/**/DejaVuSans-Bold.ttf",
+        "LiberationSans": "/usr/share/fonts/**/LiberationSans-Bold.ttf",
+        "FreeSans": "/usr/share/fonts/**/FreeSansBold.ttf",
+        "NotoSans": "/usr/share/fonts/**/NotoSans-Bold.ttf",
+    }
+
+    for font_info in font_candidates:
+        family = font_info["family"]
+        regular_path = _first_existing(font_info["regular_paths"])
+        bold_path = _first_existing(font_info["bold_paths"])
+
+        if not regular_path:
+            regular_glob = glob.glob(glob_regular_map[family], recursive=True)
+            regular_path = regular_glob[0] if regular_glob else None
+
+        if not bold_path:
+            bold_glob = glob.glob(glob_bold_map[family], recursive=True)
+            bold_path = bold_glob[0] if bold_glob else None
+
+        if not regular_path:
+            continue
+
+        try:
+            regular_name = f"{family}-Regular"
+            bold_name = f"{family}-Bold"
+            pdfmetrics.registerFont(TTFont(regular_name, regular_path))
+            if bold_path:
+                pdfmetrics.registerFont(TTFont(bold_name, bold_path))
+                font_name_bold = bold_name
+            else:
+                font_name_bold = regular_name
+
+            font_name = regular_name
+            registerFontFamily(family, normal=font_name, bold=font_name_bold)
+            break
+        except Exception:
+            continue
 
     def _pdf_text(value):
         # Normalize to NFC so Greek accented letters are emitted as precomposed glyphs.
@@ -707,7 +785,11 @@ def build_results_pdf(search_term, exact_matches, partial_matches):
             url = _pdf_text(item.get("url", ""))
             price_value = item.get('price', '')
             price_cell = "N/A" if str(price_value).strip().upper() == "N/A" else f"€ {price_value}"
-            link_cell = Paragraph(f"<link href='{escape(url, {'\"': '&quot;', "'": '&#39;'})}'>View</link>", link_style) if url else Paragraph("-", body_style)
+            if url:
+                safe_url = escape(url, {'"': '&quot;', "'": '&#39;'})
+                link_cell = Paragraph(f"<link href='{safe_url}'>View</link>", link_style)
+            else:
+                link_cell = Paragraph("-", body_style)
             table_data.append([
                 Paragraph(_pdf_paragraph_text(item.get("name", "")), body_style),
                 Paragraph(_pdf_paragraph_text(item.get("store", "")), body_style),
