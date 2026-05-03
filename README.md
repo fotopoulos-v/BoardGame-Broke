@@ -5,7 +5,7 @@
 <h1 align="center">BoardGame Broke</h1>
 
 **Hunt the best deal before your wallet gives up!**  
-A Streamlit web app that searches for a board game across **26 Greek online stores** simultaneously and shows you prices, availability, and direct product links — all in one place.
+A Streamlit web app that searches for a board game across **29 Greek online stores** simultaneously and shows you prices, availability, and direct product links — all in one place.
 
 ---
 
@@ -20,7 +20,7 @@ If you enjoy it, consider showing your support — it helps keep the app online 
 
 ## 💡 Features
 
-✅ Search any board game by name across **26 Greek stores** in a single query  
+✅ Search any board game by name across **29 Greek stores** in a single query  
 ✅ Results split into **Exact Matches** and **Partial Matches** for clarity  
 ✅ Prices sorted from lowest to highest automatically  
 ✅ In-stock / out-of-stock badge for each result  
