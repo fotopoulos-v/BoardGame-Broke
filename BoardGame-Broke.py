@@ -159,6 +159,12 @@ def try_apostrophe_variants(original_query, store_name, content, combined_data):
             return search_efantasy(query)
         elif store_name == "Public":
             return search_public(query)
+        elif store_name == "kiddylab":
+            return parse_kiddylab_html(content, query)
+        elif store_name == "Avalon Games":
+            return parse_avalongames_html(content, query)
+        elif store_name == "Fantasy Gate":
+            return parse_fantasygate_html(content, query)
         return []
     from copy import deepcopy
 
@@ -228,6 +234,12 @@ def try_apostrophe_variants(original_query, store_name, content, combined_data):
             retry_products = parse_genx_html(content, modified_query)
         elif store_name == "Public":
             retry_products = search_public(modified_query)
+        elif store_name == "kiddylab":
+            retry_products = parse_kiddylab_html(content, modified_query)
+        elif store_name == "Avalon Games":
+            retry_products = parse_avalongames_html(content, modified_query)
+        elif store_name == "Fantasy Gate":
+            retry_products = parse_fantasygate_html(content, modified_query)
 
         if retry_products:
             # Process the results
@@ -903,6 +915,309 @@ def _is_thegamerules_boardgame(name):
     lower = name.lower()
     return not any(kw in lower for kw in _THEGAMERULES_EXCLUDE_KEYWORDS)
 
+
+def parse_avalongames_html(content, game_query):
+    """HTML parser for Avalon Games search results."""
+    if not content:
+        return []
+
+    content_lower = content.lower()
+    if "there is no product that matches" in content_lower:
+        return []
+
+    products = []
+    seen_urls = set()
+    query_norm = normalize_for_match(_html.unescape(game_query))
+    query_words = query_norm.split()
+
+    def _url_key(url):
+        """Normalize URL for dedupe/output to avoid cosmetic duplicates."""
+        cleaned = _html.unescape((url or "").strip())
+        if not cleaned:
+            return ""
+        parts = urllib.parse.urlsplit(cleaned)
+        path = (parts.path or "").rstrip('/')
+        # Product pages are canonical without search parameters.
+        return urllib.parse.urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, "", ""))
+
+    block_starts = [
+        m.start() for m in re.finditer(
+            r'<div[^>]*class="[^"]*\bproduct-layout\b[^"]*"',
+            content,
+            re.IGNORECASE,
+        )
+    ]
+    if not block_starts:
+        return []
+
+    def _extract_price(block):
+        text = _html.unescape(block)
+
+        sale_match = re.search(r'class="price-new"[^>]*>\s*([0-9]+(?:[\.,][0-9]{2})?)\s*€?', text, re.IGNORECASE)
+        if sale_match:
+            return float(sale_match.group(1).replace(',', '.'))
+
+        normal_match = re.search(r'class="price-normal"[^>]*>\s*([0-9]+(?:[\.,][0-9]{2})?)\s*€?', text, re.IGNORECASE)
+        if normal_match:
+            return float(normal_match.group(1).replace(',', '.'))
+
+        generic_match = re.search(r'([0-9]+(?:[\.,][0-9]{2})?)\s*€', text, re.IGNORECASE)
+        if generic_match:
+            return float(generic_match.group(1).replace(',', '.'))
+
+        return None
+
+    for i, start in enumerate(block_starts):
+        end = block_starts[i + 1] if i + 1 < len(block_starts) else len(content)
+        block = content[start:end]
+
+        name_match = re.search(
+            r'<div[^>]*class="[^"]*\bname\b[^"]*"[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>\s*</div>',
+            block,
+            re.IGNORECASE,
+        )
+        if not name_match:
+            continue
+
+        raw_url = _html.unescape(name_match.group(1).strip())
+        raw_url = re.sub(r'\s+', '', raw_url)
+        raw_abs_url = raw_url if raw_url.startswith('http') else f"https://avalongames.gr/{raw_url.lstrip('/')}"
+        url = _url_key(raw_abs_url)
+        url_key = url
+        if not url_key or url_key in seen_urls:
+            continue
+
+        name = _html.unescape(' '.join(re.sub(r'<[^>]+>', ' ', name_match.group(2)).split()))
+        if not name:
+            continue
+
+        name_norm = normalize_for_match(name)
+        if not _query_words_in_text(query_words, name_norm):
+            continue
+
+        try:
+            price = _extract_price(block)
+        except ValueError:
+            price = None
+        if price is None:
+            continue
+
+        block_lower = block.lower()
+        block_norm = normalize_for_match(_html.unescape(block))
+
+        # Restrict OOS checks to explicit product-level markers only.
+        layout_class_match = re.search(
+            r'<div[^>]*class="([^"]*\bproduct-layout\b[^"]*)"',
+            block,
+            re.IGNORECASE,
+        )
+        layout_classes = layout_class_match.group(1).lower() if layout_class_match else ""
+
+        has_oos_layout_class = (
+            'out-of-stock' in layout_classes or
+            'outofstock' in layout_classes
+        )
+        has_oos_badge = bool(re.search(
+            r'<span[^>]*class="[^"]*product-label[^"]*"[^>]*>\s*<b>\s*out\s+of\s+stock\s*</b>',
+            block,
+            re.IGNORECASE,
+        ))
+        has_oos_text = 'εξαντλη' in block_norm
+
+        is_oos = has_oos_layout_class or has_oos_badge or has_oos_text
+        in_stock = not is_oos
+
+        products.append({
+            'name': name,
+            'price': price,
+            'is_in_stock': in_stock,
+            'url': url,
+        })
+        seen_urls.add(url_key)
+
+    return products
+
+
+FANTASYGATE_BOARDGAME_SLUGS = [
+    "strategygames", "fantasygames", "family-games",
+    "2-paiktes", "party-games", "tcg", "paixnidia-rolou",
+]
+
+
+def _is_fantasygate_boardgame_url(url):
+    """Return True only if the URL belongs to a board-game category."""
+    lower = (url or "").lower()
+    return any(slug in lower for slug in FANTASYGATE_BOARDGAME_SLUGS)
+
+
+def parse_fantasygate_html(content, game_query):
+    """Parser for Fantasy Gate search results (HTML + markdown-like output)."""
+    if not content:
+        return []
+
+    products = []
+    seen_urls = set()
+    query_norm = normalize_for_match(_html.unescape(game_query))
+    query_words = query_norm.split()
+
+    def _normalize_url(url):
+        clean = _html.unescape((url or "").strip())
+        if not clean:
+            return ""
+        if clean.startswith("http"):
+            return clean
+        return f"https://www.fantasygate.gr/{clean.lstrip('/')}"
+
+    def _is_relevant_name(name):
+        name_norm = normalize_for_match(_html.unescape(name or ""))
+        return bool(name_norm) and _query_words_in_text(query_words, name_norm)
+
+    # Path 1: markdown-like blocks often returned by scraping tools.
+    md_pattern = re.compile(
+        r'###\s*\[([^\]]+)\]\((https?://www\.fantasygate\.gr/[^)\s]+)\)[\s\S]{0,260}?([0-9]+(?:[\.,][0-9]{2})?)\s*EUR',
+        re.IGNORECASE,
+    )
+
+    for m in md_pattern.finditer(content):
+        name = _html.unescape(' '.join(m.group(1).split()))
+        url = _normalize_url(m.group(2))
+        if not name or not url or url in seen_urls:
+            continue
+        if not _is_fantasygate_boardgame_url(url):
+            continue
+        if not _is_relevant_name(name):
+            continue
+
+        try:
+            price = float(m.group(3).replace(',', '.'))
+        except ValueError:
+            continue
+
+        local = content[max(0, m.start() - 140): min(len(content), m.end() + 280)]
+        local_norm = normalize_for_match(_html.unescape(local))
+        is_oos = (
+            'out of stock' in local_norm or
+            'εξαντλη' in local_norm or
+            'μη διαθέσιμο' in local_norm
+        )
+
+        products.append({
+            'name': name,
+            'price': price,
+            'is_in_stock': not is_oos,
+            'url': url,
+        })
+        seen_urls.add(url)
+
+    # Path 2: raw HTML JoomShopping cards.
+    card_starts = [m.start() for m in re.finditer(r'productitem_\d+', content, re.IGNORECASE)]
+
+    for i, start in enumerate(card_starts):
+        end = card_starts[i + 1] if i + 1 < len(card_starts) else len(content)
+        block = content[start:end]
+
+        # Prefer jshop_img alt (product image) to avoid grabbing sale-label alt="Sale".
+        name_match = re.search(r'<img[^>]*class="jshop_img"[^>]*alt="([^"]+)"', block, re.IGNORECASE)
+        if not name_match:
+            name_match = re.search(r'<img[^>]*alt="([^"]+)"[^>]*class="jshop_img"', block, re.IGNORECASE)
+        if not name_match:
+            name_match = re.search(r'<img[^>]*alt="(?!Sale)([^"]+)"', block, re.IGNORECASE)
+        name = _html.unescape(' '.join(name_match.group(1).split())) if name_match else ""
+        if not name or not _is_relevant_name(name):
+            continue
+
+        url_match = re.search(
+            r'class="[^"]*button_detail[^"]*"[^>]*href="([^"]+)"',
+            block,
+            re.IGNORECASE,
+        )
+        if not url_match:
+            url_match = re.search(r'<a[^>]*href="(/[^"]+)"', block, re.IGNORECASE)
+        if not url_match:
+            continue
+
+        url = _normalize_url(url_match.group(1))
+        if not url or url in seen_urls:
+            continue
+        if not _is_fantasygate_boardgame_url(url):
+            continue
+
+        # Prefer sale/current price (jshop_price div) over old_price.
+        block_html = _html.unescape(block)
+        sale_price_match = re.search(
+            r'class="jshop_price"[^>]*>[\s\S]{0,80}?([0-9]+(?:[\.,][0-9]{2})?)\s*EUR',
+            block_html, re.IGNORECASE,
+        )
+        price_match = sale_price_match or re.search(
+            r'([0-9]+(?:[\.,][0-9]{2})?)\s*EUR', block_html, re.IGNORECASE
+        )
+        if not price_match:
+            continue
+
+        try:
+            price = float(price_match.group(1).replace(',', '.'))
+        except ValueError:
+            continue
+
+        block_norm = normalize_for_match(_html.unescape(block))
+        is_oos = (
+            'out of stock' in block_norm or
+            'εξαντλη' in block_norm or
+            'μη διαθέσιμο' in block_norm
+        )
+
+        products.append({
+            'name': name,
+            'price': price,
+            'is_in_stock': not is_oos,
+            'url': url,
+        })
+        seen_urls.add(url)
+
+    # Path 3: generic anchor+price fallback for non-standard transforms.
+    html_name_pattern = re.compile(
+        r'<a[^>]*href="((?:https?://www\.fantasygate\.gr)?/(?!search|cart|contact|index\.php|content|hot-deals|pliromes|apostoles|opoi-synalagon)[^"#]+)"[^>]*>([^<]{2,})</a>',
+        re.IGNORECASE,
+    )
+
+    for m in html_name_pattern.finditer(content):
+        url = _normalize_url(m.group(1))
+        if not url or url in seen_urls:
+            continue
+        if not _is_fantasygate_boardgame_url(url):
+            continue
+
+        name = _html.unescape(' '.join(m.group(2).split()))
+        if not name or not _is_relevant_name(name):
+            continue
+
+        local = content[m.end(): min(len(content), m.end() + 420)]
+        price_match = re.search(r'([0-9]+(?:[\.,][0-9]{2})?)\s*EUR', _html.unescape(local), re.IGNORECASE)
+        if not price_match:
+            continue
+
+        try:
+            price = float(price_match.group(1).replace(',', '.'))
+        except ValueError:
+            continue
+
+        local_norm = normalize_for_match(_html.unescape(local))
+        is_oos = (
+            'out of stock' in local_norm or
+            'εξαντλη' in local_norm or
+            'μη διαθέσιμο' in local_norm
+        )
+
+        products.append({
+            'name': name,
+            'price': price,
+            'is_in_stock': not is_oos,
+            'url': url,
+        })
+        seen_urls.add(url)
+
+    return products
+
 # Fallback HTML parser for The Game Rules
 def parse_thegamerules_html(content, game_query):
     """Robust parser for The Game Rules: Handles Preorders, Sale Prices, and fuzzy titles."""
@@ -1530,6 +1845,149 @@ def parse_playceshop_html(content, game_query):
             'price': price,
             'is_in_stock': in_stock,
             'url': product_url,
+        })
+        seen_urls.add(product_url)
+
+    return products
+
+
+def _is_kiddylab_boardgame_product(name, product_url, block_html):
+    """Keep board-game products and reject unrelated toys/gifts."""
+    name_l = normalize_for_match(_html.unescape(name or ""))
+    url_l = urllib.parse.unquote(product_url or "").lower()
+    block_l = (block_html or "").lower()
+    combined_l = f"{name_l} {url_l} {block_l}"
+
+    positive_markers = [
+        "product_cat-epitrapezia-paixnidia",
+        "product_cat-epitrapezia-enilikon",
+        "product_cat-board-games",
+        "product_cat-card-games",
+        "board game",
+        "board-game",
+        "card game",
+        "card-game",
+        "επιτραπέζ",
+        "επιτραπεζ",
+        "expansion",
+        "επέκταση",
+        "επεκταση",
+    ]
+    if any(marker in combined_l for marker in positive_markers):
+        return True
+
+    blocked_markers = [
+        "product_cat-epoxiaka-eidi",
+        "product_cat-paixnidia-kataskeuon",
+        "product_cat-xeirotexnies",
+        "λαμπάδα",
+        "λαμπαδα",
+        "bracelet",
+        "βραχιόλια",
+        "βραχιολια",
+    ]
+    if any(marker in combined_l for marker in blocked_markers):
+        return False
+
+    return False
+
+
+def parse_kiddylab_html(content, game_query):
+    """HTML parser for Kiddylab Woodmart search results."""
+    if not content:
+        return []
+
+    content_lower = content.lower()
+    no_results_markers = [
+        "woocommerce-no-products-found",
+        "woocommerce-info hidden-notice",
+        "δεν βρέθηκε κανένα προϊόν",
+        "δεν βρεθηκε κανενα προϊόν",
+        "δεν βρεθηκε κανενα προϊον",
+        "no products were found matching your selection",
+    ]
+    if any(marker in content_lower for marker in no_results_markers):
+        return []
+
+    products = []
+    seen_urls = set()
+    query_norm = normalize_for_match(_html.unescape(game_query))
+    query_words = query_norm.split()
+
+    card_starts = [
+        m.start() for m in re.finditer(
+            r'<div[^>]*class="[^"]*\bwd-product\b[^"]*\bproduct-grid-item\b[^"]*"',
+            content,
+            re.IGNORECASE,
+        )
+    ]
+    if not card_starts:
+        return []
+
+    for i, start in enumerate(card_starts):
+        end = card_starts[i + 1] if i + 1 < len(card_starts) else len(content)
+        block = content[start:end]
+
+        name_match = re.search(
+            r'<h3[^>]*class="[^"]*wd-entities-title[^"]*"[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>',
+            block,
+            re.IGNORECASE,
+        )
+        if not name_match:
+            continue
+
+        raw_url = _html.unescape(name_match.group(1).strip())
+        product_url = raw_url if raw_url.startswith("http") else f"https://www.kiddylab.gr{raw_url}"
+        if product_url in seen_urls:
+            continue
+
+        name = _html.unescape(" ".join(re.sub(r"<[^>]+>", " ", name_match.group(2)).split()))
+        if not name:
+            continue
+
+        if not _is_kiddylab_boardgame_product(name, product_url, block):
+            continue
+
+        name_norm = normalize_for_match(name)
+        if not _query_words_in_text(query_words, name_norm):
+            continue
+
+        price = None
+        sale_match = re.search(
+            r'<ins[^>]*>[\s\S]*?<bdi>\s*([0-9]+(?:[\.,][0-9]{2})?)',
+            block,
+            re.IGNORECASE,
+        )
+        regular_match = re.search(
+            r'woocommerce-Price-amount\s+amount[^>]*><bdi>\s*([0-9]+(?:[\.,][0-9]{2})?)',
+            block,
+            re.IGNORECASE,
+        )
+        price_match = sale_match or regular_match
+        if not price_match:
+            continue
+        try:
+            price = float(price_match.group(1).replace(",", "."))
+        except ValueError:
+            continue
+
+        block_lower = block.lower()
+        is_oos = (
+            "outofstock" in block_lower or
+            "out-of-stock" in block_lower or
+            "εξαντλη" in block_lower
+        )
+        has_add_to_cart = (
+            "add_to_cart_button" in block_lower or
+            "προσθήκη στο καλάθι" in block_lower
+        )
+        in_stock = not is_oos and (has_add_to_cart or " instock " in f" {block_lower} ")
+
+        products.append({
+            "name": name,
+            "price": price,
+            "is_in_stock": in_stock,
+            "url": product_url,
         })
         seen_urls.add(product_url)
 
@@ -4404,7 +4862,10 @@ def search_game_structured(game_query):
         {"name": "Lex Hobby Store", "url": f"https://www.skroutz.gr/c/259/epitrapezia/shop/29102/Lex-Hobby-Store.html?keyphrase={encoded_query}"},
         {"name": "GenX", "url": f"https://www.genx.gr/index.php?act=viewCat&searchStr={encoded_query}"},
         {"name": "Public", "url": f"https://www.public.gr/search/?text={encoded_query}&type=product"},
-        {"name": "VP shop", "url": f"https://shop.vpsaga.com/?s={encoded_query}&post_type=product"}
+        {"name": "VP shop", "url": f"https://shop.vpsaga.com/?s={encoded_query}&post_type=product"},
+        {"name": "kiddylab", "url": f"https://www.kiddylab.gr/search-results?s={encoded_query}"},
+        {"name": "Avalon Games", "url": f"https://avalongames.gr/index.php?route=product/search&search={encoded_query}&description=true"},
+        {"name": "Fantasy Gate", "url": f"https://www.fantasygate.gr/search/result?search={encoded_query}"}
     ]
 
     combined_data = {"search_term": game_query, "exact_matches": [], "all_results": [], "store_stats": {}}
@@ -4619,7 +5080,7 @@ def search_game_structured(game_query):
                 "Fantasy Shop", "Nerdom", "GamesUniverse",
                 "Meeple On Board", "No Label X", "SoHotTCG", "Tech City", "Game Theory",
                 "Mystery Bay", "Meeple Planet",
-                "RollnPlay", "PlayceShop", "VP shop", "Politeia", "Crystal Lotus", "Kaissa", "Gaming Galaxy", "The Dragonphoenix Inn", "GenX"
+                "RollnPlay", "PlayceShop", "VP shop", "Politeia", "Crystal Lotus", "Kaissa", "Gaming Galaxy", "The Dragonphoenix Inn", "GenX", "kiddylab", "Avalon Games", "Fantasy Gate"
             ]
 
             result, error = scrape_with_retry(app, store["url"], store_name,
@@ -4681,6 +5142,12 @@ def search_game_structured(game_query):
                         raw_products = parse_dragonphoenixinn_html(content, game_query)
                     elif store_name == "GenX":
                         raw_products = parse_genx_html(content, game_query)
+                    elif store_name == "kiddylab":
+                        raw_products = parse_kiddylab_html(content, game_query)
+                    elif store_name == "Avalon Games":
+                        raw_products = parse_avalongames_html(content, game_query)
+                    elif store_name == "Fantasy Gate":
+                        raw_products = parse_fantasygate_html(content, game_query)
                     else:
                         raw_products = []
                 else:
@@ -4820,6 +5287,12 @@ def search_game_structured(game_query):
                         retry_raw_products = parse_dragonphoenixinn_html(content, query_without_colon)
                     elif store_name == "GenX":
                         retry_raw_products = parse_genx_html(content, query_without_colon)
+                    elif store_name == "kiddylab":
+                        retry_raw_products = parse_kiddylab_html(content, query_without_colon)
+                    elif store_name == "Avalon Games":
+                        retry_raw_products = parse_avalongames_html(content, query_without_colon)
+                    elif store_name == "Fantasy Gate":
+                        retry_raw_products = parse_fantasygate_html(content, query_without_colon)
                     else:
                         retry_raw_products = []
 
@@ -4957,6 +5430,12 @@ def search_game_structured(game_query):
                         retry_raw_products = parse_dragonphoenixinn_html(retry_content, query_without_dash)
                     elif store_name == "GenX":
                         retry_raw_products = parse_genx_html(retry_content, query_without_dash)
+                    elif store_name == "kiddylab":
+                        retry_raw_products = parse_kiddylab_html(retry_content, query_without_dash)
+                    elif store_name == "Avalon Games":
+                        retry_raw_products = parse_avalongames_html(retry_content, query_without_dash)
+                    elif store_name == "Fantasy Gate":
+                        retry_raw_products = parse_fantasygate_html(retry_content, query_without_dash)
                     else:
                         retry_raw_products = []
 

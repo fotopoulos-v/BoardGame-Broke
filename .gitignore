@@ -17,3 +17,4 @@ packages.txt
 
 supabase_usage_events.sql
 usage_events_rows.csv
+usage_events.jsonl

@@ -149,6 +149,9 @@ STORE_LIST = [
     {"name": "GenX",             "url": "https://www.genx.gr/epitrapezia--paixnidia-c_60.html"},
     {"name": "Public",           "url": "https://www.public.gr/cat/kids-and-toys/board-games/des-ta-ola"},
     {"name": "VP shop",          "url": "https://shop.vpsaga.com/"},
+    {"name": "kiddylab",         "url": "https://www.kiddylab.gr/product-category/paixnidia-gia-paidia/epitrapezia-paixnidia/"},
+    {"name": "Avalon Games",     "url": "https://avalongames.gr/epitrapezia-paixnidia/"},
+    {"name": "Fantasy Gate",     "url": "https://www.fantasygate.gr/search/result"}
     ]
 
 
@@ -1124,12 +1127,10 @@ if run_search and current_query:
 
 
         def _search_with_live_updates(game_query, active_store_names):
-            """Scraping loop with live Streamlit progress updates and deferred retry."""
-            import importlib.util as _ilu, pathlib as _pl
-            _p = _pl.Path(__file__).parent / "BoardGame-Broke.py"
-            _s = _ilu.spec_from_file_location("_bgb_live", _p)
-            _m = _ilu.module_from_spec(_s)
-            _s.loader.exec_module(_m)
+            """Scraping loop with live Streamlit progress updates and parallel store fetching."""
+            from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+            _m = _mod  # use already-loaded module — no re-import on every search
 
             encoded_query = _urlparse.quote_plus(game_query)
             all_stores = [
@@ -1159,6 +1160,9 @@ if run_search and current_query:
                 {"name": "GenX",             "url": f"https://www.genx.gr/index.php?act=viewCat&searchStr={encoded_query}"},
                 {"name": "Public",           "url": f"https://www.public.gr/search/?text={encoded_query}&type=product"},
                 {"name": "VP shop",          "url": f"https://shop.vpsaga.com/?s={encoded_query}&post_type=product"},
+                {"name": "kiddylab",         "url": f"https://www.kiddylab.gr/search-results?s={encoded_query}"},
+                {"name": "Avalon Games",     "url": f"https://avalongames.gr/index.php?route=product/search&search={encoded_query}&description=true"},
+                {"name": "Fantasy Gate",     "url": f"https://www.fantasygate.gr/search/result?search={encoded_query}"}
             ]
             stores = [s for s in all_stores if s["name"] in active_store_names]
 
@@ -1168,362 +1172,302 @@ if run_search and current_query:
                 "all_results": [],
                 "store_stats": {},
             }
-            clean_query = game_query.lower().replace(":", "").strip()
-            ozon_clean_query = _m.sanitize_ozon_name(game_query)
+            # Stores served by direct HTTP requests — no Firecrawl needed
+            DIRECT_STORES = frozenset([
+                "eFantasy", "Public", "Ozon.gr", "RollnPlay",
+                "Meeple Planet", "Crystal Lotus", "Gaming Galaxy", "The Dragonphoenix Inn",
+            ])
 
-            # ── Helper: scrape one store and process results ──────────────────────
-            def scrape_store(store, attempt_label):
-                store_name = store["name"]
-                ph = store_placeholders.get(store_name)
+            # Max 2 simultaneous Firecrawl API calls to avoid rate-limiting
+            firecrawl_sem = threading.Semaphore(2)
 
+            # ── dispatch: direct HTTP request ────────────────────────────────────
+            def _direct_call(sname, query):
+                if sname == "Ozon.gr":               return _m.search_ozon(query)
+                if sname == "eFantasy":              return _m.search_efantasy(query)
+                if sname == "RollnPlay":             return _m.search_rollnplay(query)
+                if sname == "Meeple Planet":         return _m.search_meepleplanet(query)
+                if sname == "Crystal Lotus":         return _m.search_crystallotus(query)
+                if sname == "Gaming Galaxy":         return _m.search_gaminggalaxy(query)
+                if sname == "The Dragonphoenix Inn": return _m.search_dragonphoenixinn(query)
+                return _m.search_public(query)
+
+            # ── dispatch: HTML/markdown content parser ───────────────────────────
+            def _parse_content(sname, content, query):
+                if sname == "The Game Rules":        return _m.parse_thegamerules_html(content, query)
+                if sname == "epitrapez.io":          return _m.parse_epitrapezio_html(content, query)
+                if sname == "Fantasy Shop":          return _m.parse_fantasyshop_html(content, query)
+                if sname == "VP shop":               return _m.parse_vpshop_html(content, query)
+                if sname == "Nerdom":                return _m.parse_nerdom_html(content, query)
+                if sname == "Ozon.gr":               return _m.parse_ozon_html(content, query)
+                if sname == "Meeple On Board":       return _m.parse_meepleonboard_html(content, query)
+                if sname == "No Label X":            return _m.parse_nolabelx_html(content, query)
+                if sname == "Lex Hobby Store":       return _m.parse_lexhobby_html(content, query)
+                if sname == "SoHotTCG":              return _m.parse_sohottcg_html(content, query)
+                if sname == "Tech City":             return _m.parse_techcity_html(content, query)
+                if sname == "Game Theory":           return _m.parse_gametheory_html(content, query)
+                if sname == "Mystery Bay":           return _m.parse_mysterybay_html(content, query)
+                if sname == "Meeple Planet":         return _m.parse_meepleplanet_html(content, query)
+                if sname == "Boards of Madness":     return _m.parse_boardsofmadness_html(content, query)
+                if sname == "GamesUniverse":         return _m.parse_gamesuniverse_html(content, query)
+                if sname == "PlayceShop":            return _m.parse_playceshop_html(content, query)
+                if sname == "Politeia":              return _m.parse_politeia_html(content, query)
+                if sname == "Crystal Lotus":         return _m.parse_crystallotus_html(content, query)
+                if sname == "Kaissa":                return _m.parse_kaissa_html(content, query)
+                if sname == "Gaming Galaxy":         return _m.parse_gaminggalaxy_html(content, query)
+                if sname == "The Dragonphoenix Inn": return _m.parse_dragonphoenixinn_html(content, query)
+                if sname == "GenX":                  return _m.parse_genx_html(content, query)
+                if sname == "Public":                return _m.parse_public_html(content, query)
+                if sname == "kiddylab":              return _m.parse_kiddylab_html(content, query)
+                if sname == "Avalon Games":          return _m.parse_avalongames_html(content, query)
+                if sname == "Fantasy Gate":          return _m.parse_fantasygate_html(content, query)
+                if sname == "RollnPlay":             return _m.parse_rollnplay_html(content, query)
+                return []
+
+            # ── merge products into combined_data — call from main thread only ───
+            def _add_products(sname, raw_products, target_query, seen_urls):
+                added = 0
+                added_exact = 0
+                for p in raw_products:
+                    if isinstance(p, dict):
+                        p_name  = p.get("name", "")
+                        p_price = p.get("price", 0.0)
+                        p_stock = p.get("is_in_stock", False)
+                        p_url   = p.get("url", "")
+                    else:
+                        p_name  = getattr(p, "name", "")
+                        p_price = getattr(p, "price", 0.0)
+                        p_stock = getattr(p, "is_in_stock", False)
+                        p_url   = getattr(p, "url", "")
+                    if not p_url or p_url in seen_urls:
+                        continue
+                    query_norm  = _m.normalize_for_match(target_query)
+                    query_words = query_norm.split() if query_norm else []
+                    name_norm   = _m.eFantasy_match_text(p_name) if sname == "eFantasy" else _m.normalize_for_match(p_name)
+                    if not _m._query_words_in_text(query_words, name_norm):
+                        continue
+                    if sname == "Ozon.gr":
+                        comparison_name = _m.sanitize_ozon_name(p_name)
+                        exact_target    = _m.sanitize_ozon_name(target_query)
+                    elif sname == "eFantasy":
+                        comparison_name = _m.sanitize_efantasy_name(p_name)
+                        exact_target    = _m.sanitize_efantasy_name(target_query)
+                    elif sname == "Public":
+                        comparison_name = _m.sanitize_public_name(p_name)
+                        exact_target    = _m.sanitize_public_name(target_query)
+                    elif sname in ("No Label X", "SoHotTCG", "Tech City", "Game Theory", "Lex Hobby Store"):
+                        comparison_name = _m.normalize_for_match(
+                            _m.sanitize_nolabelx_name(p_name) if sname != "Lex Hobby Store"
+                            else _m.sanitize_lexhobby_name(p_name)
+                        )
+                        exact_target = _m.normalize_for_match(target_query)
+                    else:
+                        comparison_name = _m.normalize_for_match(p_name)
+                        exact_target    = _m.normalize_for_match(target_query)
+                    entry = {
+                        "name": p_name, "url": p_url, "in_stock": p_stock,
+                        "price": _m.format_price_for_output(p_price), "store": sname,
+                    }
+                    combined_data["all_results"].append(entry)
+                    seen_urls.add(p_url)
+                    added += 1
+                    if comparison_name == exact_target:
+                        combined_data["exact_matches"].append(entry)
+                        added_exact += 1
+                return added, added_exact
+
+            # ── worker: all I/O + parsing for one store, returns isolated results ─
+            def _store_worker(store, sem):
+                sname = store["name"]
+                try:
+                    if sname in DIRECT_STORES:
+                        # --- Direct HTTP path ---
+                        raw = _direct_call(sname, game_query)
+                        eff_query = game_query
+
+                        # Apostrophe fallback (re-fetch with variant query)
+                        if not raw and any(ch in game_query for ch in _m.APOSTROPHE_VARIANTS):
+                            for ap_char in _m.APOSTROPHE_VARIANTS:
+                                mq = game_query
+                                for ap2 in _m.APOSTROPHE_VARIANTS:
+                                    mq = mq.replace(ap2, ap_char)
+                                if mq == game_query:
+                                    continue
+                                raw = _direct_call(sname, mq)
+                                if raw:
+                                    eff_query = mq
+                                    break
+
+                        # Colon fallback (re-fetch)
+                        if not raw and ":" in game_query:
+                            qc = game_query.replace(":", "").strip()
+                            if qc and qc != game_query:
+                                raw = _direct_call(sname, qc)
+                                if raw:
+                                    eff_query = qc
+
+                        # Dash fallback (re-fetch)
+                        if not raw and any(ch in game_query for ch in _m.DASH_VARIANTS):
+                            qd = _m.strip_dash_variants(game_query)
+                            if qd and qd != game_query:
+                                raw = _direct_call(sname, qd)
+                                if raw:
+                                    eff_query = qd
+
+                        return sname, raw or [], eff_query, None
+
+                    else:
+                        # --- Firecrawl path ---
+                        with sem:
+                            result, error = _m.scrape_with_retry(
+                                _m.app, store["url"], sname,
+                                max_retries=1, use_html_fallback=True,
+                            )
+                        if error:
+                            return sname, [], game_query, error
+
+                        html_c = result.html     if hasattr(result, "html")     and result.html     else ""
+                        md_c   = result.markdown if hasattr(result, "markdown") and result.markdown else ""
+                        content = html_c + md_c
+
+                        if not content:
+                            return sname, [], game_query, None
+
+                        raw = _parse_content(sname, content, game_query)
+                        eff_query = game_query
+
+                        # Apostrophe fallback (reparse same fetched content)
+                        if not raw and any(ch in game_query for ch in _m.APOSTROPHE_VARIANTS):
+                            for ap_char in _m.APOSTROPHE_VARIANTS:
+                                mq = game_query
+                                for ap2 in _m.APOSTROPHE_VARIANTS:
+                                    mq = mq.replace(ap2, ap_char)
+                                if mq == game_query:
+                                    continue
+                                raw = _parse_content(sname, content, mq)
+                                if raw:
+                                    eff_query = mq
+                                    break
+
+                        # Colon fallback (reparse)
+                        if not raw and ":" in game_query:
+                            qc = game_query.replace(":", "").strip()
+                            if qc and qc != game_query:
+                                raw = _parse_content(sname, content, qc)
+                                if raw:
+                                    eff_query = qc
+
+                        # Dash fallback (reparse; The Game Rules always re-fetches)
+                        if not raw and any(ch in game_query for ch in _m.DASH_VARIANTS):
+                            qd = _m.strip_dash_variants(game_query)
+                            if qd and qd != game_query:
+                                retry_content = content
+                                if sname == "The Game Rules":
+                                    retry_url = (
+                                        "https://www.thegamerules.com/index.php?route=product/search"
+                                        f"&search={_urlparse.quote_plus(qd)}&description=true"
+                                    )
+                                    with sem:
+                                        rr, re = _m.scrape_with_retry(
+                                            _m.app, retry_url, sname,
+                                            max_retries=1, use_html_fallback=True,
+                                        )
+                                    if not re and rr:
+                                        rh = rr.html     if hasattr(rr, "html")     and rr.html     else ""
+                                        rm = rr.markdown if hasattr(rr, "markdown") and rr.markdown else ""
+                                        if rh or rm:
+                                            retry_content = rh + rm
+                                raw = _parse_content(sname, retry_content, qd)
+                                if raw:
+                                    eff_query = qd
+
+                        return sname, raw or [], eff_query, None
+
+                except Exception as exc:
+                    return sname, [], game_query, str(exc)
+
+            # ── Show all active stores as "searching…" upfront ────────────────────
+            for store in stores:
+                ph = store_placeholders.get(store["name"])
                 if ph:
                     ph.markdown(
-                        f"<div class='progress-store'>🔎 <strong>{store_name}</strong> — {attempt_label}…</div>",
+                        f"<div class='progress-store'>🔎 <strong>{store['name']}</strong> — searching…</div>",
                         unsafe_allow_html=True,
                     )
-                def parse_with_query(content_value, query_value):
-                    if store_name == "The Game Rules":
-                        return _m.parse_thegamerules_html(content_value, query_value)
-                    if store_name == "epitrapez.io":
-                        return _m.parse_epitrapezio_html(content_value, query_value)
-                    if store_name == "Fantasy Shop":
-                        return _m.parse_fantasyshop_html(content_value, query_value)
-                    if store_name == "VP shop":
-                        return _m.parse_vpshop_html(content_value, query_value)
-                    if store_name == "Nerdom":
-                        return _m.parse_nerdom_html(content_value, query_value)
-                    if store_name == "Ozon.gr":
-                        return _m.parse_ozon_html(content_value, query_value)
-                    if store_name == "Meeple On Board":
-                        return _m.parse_meepleonboard_html(content_value, query_value)
-                    if store_name == "No Label X":
-                        return _m.parse_nolabelx_html(content_value, query_value)
-                    if store_name == "Lex Hobby Store":
-                        return _m.parse_lexhobby_html(content_value, query_value)
-                    if store_name == "SoHotTCG":
-                        return _m.parse_sohottcg_html(content_value, query_value)
-                    if store_name == "Tech City":
-                        return _m.parse_techcity_html(content_value, query_value)
-                    if store_name == "Game Theory":
-                        return _m.parse_gametheory_html(content_value, query_value)
-                    if store_name == "Mystery Bay":
-                        return _m.parse_mysterybay_html(content_value, query_value)
-                    if store_name == "Meeple Planet":
-                        return _m.parse_meepleplanet_html(content_value, query_value)
-                    if store_name == "Boards of Madness":
-                        return _m.parse_boardsofmadness_html(content_value, query_value)
-                    if store_name == "GamesUniverse":
-                        return _m.parse_gamesuniverse_html(content_value, query_value)
-                    if store_name == "PlayceShop":
-                        return _m.parse_playceshop_html(content_value, query_value)
-                    if store_name == "Politeia":
-                        return _m.parse_politeia_html(content_value, query_value)
-                    if store_name == "Crystal Lotus":
-                        return _m.parse_crystallotus_html(content_value, query_value)
-                    if store_name == "Kaissa":
-                        return _m.parse_kaissa_html(content_value, query_value)
-                    if store_name == "Gaming Galaxy":
-                        return _m.parse_gaminggalaxy_html(content_value, query_value)
-                    if store_name == "The Dragonphoenix Inn":
-                        return _m.parse_dragonphoenixinn_html(content_value, query_value)
-                    if store_name == "GenX":
-                        return _m.parse_genx_html(content_value, query_value)
-                    if store_name == "Public":
-                        return _m.parse_public_html(content_value, query_value)
-                    return []
 
-                def add_products(raw_products, target_query_value, seen_urls):
-                    added = 0
-                    added_exact = 0
-                    for p in raw_products:
-                        if isinstance(p, dict):
-                            p_name = p.get("name", "")
-                            p_price = p.get("price", 0.0)
-                            p_stock = p.get("is_in_stock", False)
-                            p_url = p.get("url", "")
-                        else:
-                            p_name = getattr(p, "name", "")
-                            p_price = getattr(p, "price", 0.0)
-                            p_stock = getattr(p, "is_in_stock", False)
-                            p_url = getattr(p, "url", "")
-
-                        if not p_url or p_url in seen_urls:
-                            continue
-
-                        query_norm = _m.normalize_for_match(target_query_value)
-                        query_words = query_norm.split() if query_norm else []
-                        if store_name == "eFantasy":
-                            name_norm = _m.eFantasy_match_text(p_name)
-                        else:
-                            name_norm = _m.normalize_for_match(p_name)
-                        if not _m._query_words_in_text(query_words, name_norm):
-                            continue
-
-                        if store_name == "Ozon.gr":
-                            comparison_name = _m.sanitize_ozon_name(p_name)
-                            exact_target = _m.sanitize_ozon_name(target_query_value)
-                        elif store_name == "eFantasy":
-                            comparison_name = _m.sanitize_efantasy_name(p_name)
-                            exact_target = _m.sanitize_efantasy_name(target_query_value)
-                        elif store_name == "Public":
-                            comparison_name = _m.sanitize_public_name(p_name)
-                            exact_target = _m.sanitize_public_name(target_query_value)
-                        elif store_name in ["No Label X", "SoHotTCG", "Tech City", "Game Theory", "Lex Hobby Store"]:
-                            comparison_name = _m.normalize_for_match(_m.sanitize_nolabelx_name(p_name) if store_name != "Lex Hobby Store" else _m.sanitize_lexhobby_name(p_name))
-                            exact_target = _m.normalize_for_match(target_query_value)
-                        else:
-                            comparison_name = _m.normalize_for_match(p_name)
-                            exact_target = _m.normalize_for_match(target_query_value)
-
-                        entry = {
-                            "name": p_name,
-                            "url": p_url,
-                            "in_stock": p_stock,
-                            "price": _m.format_price_for_output(p_price),
-                            "store": store_name,
-                        }
-                        combined_data["all_results"].append(entry)
-                        seen_urls.add(p_url)
-                        added += 1
-
-                        if comparison_name == exact_target:
-                            combined_data["exact_matches"].append(entry)
-                            added_exact += 1
-
-                    return added, added_exact
-
-                # Carry over URLs already added by previous retry attempts
-                seen_urls_in_store = {
-                    item["url"] for item in combined_data["all_results"]
-                    if item.get("store") == store_name and item.get("url")
-                }
-                valid_store_count = 0
-                exact_count = 0
-
-                # ── Direct request-backed stores ───────────────────────────────
-                if store_name in ["eFantasy", "Public", "RollnPlay", "Meeple Planet", "Crystal Lotus", "Gaming Galaxy", "The Dragonphoenix Inn"]:
-                    if store_name == "eFantasy":
-                        fetch_func = _m.search_efantasy
-                    elif store_name == "RollnPlay":
-                        fetch_func = _m.search_rollnplay
-                    elif store_name == "Meeple Planet":
-                        fetch_func = _m.search_meepleplanet
-                    elif store_name == "Crystal Lotus":
-                        fetch_func = _m.search_crystallotus
-                    elif store_name == "Gaming Galaxy":
-                        fetch_func = _m.search_gaminggalaxy
-                    elif store_name == "The Dragonphoenix Inn":
-                        fetch_func = _m.search_dragonphoenixinn
-                    else:
-                        fetch_func = _m.search_public
-                    try:
-                        raw_products = fetch_func(game_query)
-                    except Exception as e:
-                        return False, str(e)
-
-                    a, e = add_products(raw_products, game_query, seen_urls_in_store)
-                    valid_store_count += a
-                    exact_count += e
-
-                    apostrophe_success = False
-                    if valid_store_count == 0 and any(ch in game_query for ch in _m.APOSTROPHE_VARIANTS):
-                        apostrophe_success = _m.try_apostrophe_variants(game_query, store_name, None, combined_data)
-                        valid_store_count = combined_data.get("store_stats", {}).get(store_name, {}).get("total", 0)
-                        exact_count = combined_data.get("store_stats", {}).get(store_name, {}).get("exact", 0)
-
-                    if valid_store_count == 0 and not apostrophe_success and ":" in game_query:
-                        query_no_colon = game_query.replace(":", "").strip()
-                        if query_no_colon and query_no_colon != game_query:
-                            try:
-                                retry_products = fetch_func(query_no_colon)
-                            except Exception:
-                                retry_products = []
-                            a, e = add_products(retry_products, query_no_colon, seen_urls_in_store)
-                            valid_store_count += a
-                            exact_count += e
-
-                    if valid_store_count == 0 and any(ch in game_query for ch in _m.DASH_VARIANTS):
-                        query_no_dash = _m.strip_dash_variants(game_query)
-                        if query_no_dash and query_no_dash != game_query:
-                            try:
-                                retry_products = fetch_func(query_no_dash)
-                            except Exception:
-                                retry_products = []
-                            a, e = add_products(retry_products, query_no_dash, seen_urls_in_store)
-                            valid_store_count += a
-                            exact_count += e
-
-                    combined_data["store_stats"][store_name] = {"total": valid_store_count, "exact": exact_count}
-                else:
-                    use_html_fallback = store_name in [
-                        "The Game Rules", "epitrapez.io", "Boards of Madness",
-                        "Fantasy Shop", "Nerdom", "Ozon.gr", "GamesUniverse",
-                        "Meeple On Board", "No Label X", "SoHotTCG", "Tech City", "Game Theory", "Lex Hobby Store",
-                        "Mystery Bay", "Meeple Planet", "PlayceShop", "VP shop", "Politeia", "Crystal Lotus", "Kaissa", "Gaming Galaxy", "The Dragonphoenix Inn", "GenX"
-                    ]
-
-                    result, error = _m.scrape_with_retry(
-                        _m.app, store["url"], store_name,
-                        max_retries=1,
-                        use_html_fallback=use_html_fallback,
-                    )
-                    if error:
-                        return False, error
-
-                    content = ""
-                    if use_html_fallback:
-                        html_content = result.html if hasattr(result, "html") and result.html else ""
-                        markdown_content = result.markdown if hasattr(result, "markdown") and result.markdown else ""
-                        content = html_content + markdown_content
-                        raw_products = parse_with_query(content, game_query) if content else []
-                    else:
-                        raw_products = result.json.get("products", []) if (result and hasattr(result, "json") and result.json) else []
-
-                    a, e = add_products(raw_products, game_query, seen_urls_in_store)
-                    valid_store_count += a
-                    exact_count += e
-
-                    if valid_store_count == 0 and use_html_fallback and content and any(ch in game_query for ch in _m.APOSTROPHE_VARIANTS):
-                        _m.try_apostrophe_variants(game_query, store_name, content, combined_data)
-                        valid_store_count = combined_data.get("store_stats", {}).get(store_name, {}).get("total", 0)
-                        exact_count = combined_data.get("store_stats", {}).get(store_name, {}).get("exact", 0)
-
-                    if valid_store_count == 0 and use_html_fallback and content and ":" in game_query:
-                        query_no_colon = game_query.replace(":", "").strip()
-                        if query_no_colon and query_no_colon != game_query:
-                            retry_products = parse_with_query(content, query_no_colon)
-                            a, e = add_products(retry_products, query_no_colon, seen_urls_in_store)
-                            valid_store_count += a
-                            exact_count += e
-
-                    force_dash_retry = store_name == "The Game Rules"
-                    if ((valid_store_count == 0 or force_dash_retry) and
-                        use_html_fallback and
-                        content and
-                        any(ch in game_query for ch in _m.DASH_VARIANTS)):
-                        query_no_dash = _m.strip_dash_variants(game_query)
-                        if query_no_dash and query_no_dash != game_query:
-                            retry_content = content
-
-                            # The Game Rules can return a narrower set for dashed queries,
-                            # so fetch again with the dash-stripped query.
-                            if store_name == "The Game Rules":
-                                retry_url = (
-                                    "https://www.thegamerules.com/index.php?route=product/search"
-                                    f"&search={_urlparse.quote_plus(query_no_dash)}&description=true"
-                                )
-                                retry_result, retry_error = _m.scrape_with_retry(
-                                    _m.app,
-                                    retry_url,
-                                    store_name,
-                                    max_retries=1,
-                                    use_html_fallback=True,
-                                )
-                                if not retry_error and retry_result:
-                                    retry_html = retry_result.html if hasattr(retry_result, "html") and retry_result.html else ""
-                                    retry_markdown = retry_result.markdown if hasattr(retry_result, "markdown") and retry_result.markdown else ""
-                                    if retry_html or retry_markdown:
-                                        retry_content = retry_html + retry_markdown
-
-                            retry_products = parse_with_query(retry_content, query_no_dash)
-                            a, e = add_products(retry_products, query_no_dash, seen_urls_in_store)
-                            valid_store_count += a
-                            exact_count += e
-
-                    combined_data["store_stats"][store_name] = {"total": valid_store_count, "exact": exact_count}
-
-                if ph:
-                    if valid_store_count > 0:
-                        ph.markdown(
-                            f"<div class='progress-store progress-store-done'>"
-                            f"✅ <strong>{store_name}</strong> — {valid_store_count} result(s) found "
-                            f"({exact_count} exact)</div>",
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        ph.markdown(
-                            f"<div class='progress-store progress-store-done'>"
-                            f"✅ <strong>{store_name}</strong> — 0 results</div>",
-                            unsafe_allow_html=True,
-                        )
-
-                return True, None
-
-            # ── Round 1: scrape all stores ────────────────────────────────────────
-            failed_stores = []
-
-            for store in stores:
-                store_name = store["name"]
-                ph = store_placeholders.get(store_name)
-                try:
-                    success, error = scrape_store(store, "scraping")
-                    if not success:
-                        failed_stores.append(store)
-                        combined_data["store_stats"][store_name] = {"error": error[:200]}
-                        if ph:
-                            ph.markdown(
-                                f"<div class='progress-store progress-store-error'>"
-                                f"❌ <strong>{store_name}</strong> — error (retrying later…)</div>",
-                                unsafe_allow_html=True,
-                            )
-                except Exception as e:
-                    failed_stores.append(store)
-                    combined_data["store_stats"][store_name] = {"error": str(e)[:200]}
-                    if ph:
-                        ph.markdown(
-                            f"<div class='progress-store progress-store-error'>"
-                            f"❌ <strong>{store_name}</strong> — error (retrying later…)</div>",
-                            unsafe_allow_html=True,
-                        )
-
-            # ── Rounds 2 & 3: deferred retries for failed stores ─────────────────
-            for retry_num in range(1, 3):  # retry_num = 1, 2
-                if not failed_stores:
-                    break
-
-                still_failing = []
-
-                for store in failed_stores:
-                    store_name = store["name"]
-                    ph = store_placeholders.get(store_name)
-                    try:
-                        success, error = scrape_store(
-                            store, f"retry {retry_num}/2"
-                        )
-                        if not success:
-                            still_failing.append(store)
-                            combined_data["store_stats"][store_name] = {"error": error[:200]}
+            # ── Parallel fetch helper, reused for all rounds ──────────────────────
+            def _run_round(round_stores, is_final_retry=False):
+                _failed = []
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    futures = {
+                        executor.submit(_store_worker, store, firecrawl_sem): store
+                        for store in round_stores
+                    }
+                    for f in _as_completed(futures):
+                        store  = futures[f]
+                        sname  = store["name"]
+                        ph     = store_placeholders.get(sname)
+                        try:
+                            _, products, eff_query, error = f.result()
+                        except Exception as exc:
+                            error     = str(exc)
+                            products  = []
+                            eff_query = game_query
+                        if error:
+                            _failed.append(store)
+                            combined_data["store_stats"][sname] = {"error": error[:200]}
                             if ph:
-                                if retry_num < 2:
+                                if is_final_retry:
                                     ph.markdown(
                                         f"<div class='progress-store progress-store-error'>"
-                                        f"❌ <strong>{store_name}</strong> — error (1 more retry…)</div>",
+                                        f"❌ <strong>{sname}</strong> — failed after 3 attempts</div>",
                                         unsafe_allow_html=True,
                                     )
                                 else:
                                     ph.markdown(
                                         f"<div class='progress-store progress-store-error'>"
-                                        f"❌ <strong>{store_name}</strong> — failed after 3 attempts</div>",
+                                        f"❌ <strong>{sname}</strong> — error (retrying later…)</div>",
                                         unsafe_allow_html=True,
                                     )
-                    except Exception as e:
-                        still_failing.append(store)
-                        combined_data["store_stats"][store_name] = {"error": str(e)[:200]}
-                        if ph:
-                            if retry_num < 2:
-                                ph.markdown(
-                                    f"<div class='progress-store progress-store-error'>"
-                                    f"❌ <strong>{store_name}</strong> — error (1 more retry…)</div>",
-                                    unsafe_allow_html=True,
-                                )
-                            else:
-                                ph.markdown(
-                                    f"<div class='progress-store progress-store-error'>"
-                                    f"❌ <strong>{store_name}</strong> — failed after 3 attempts</div>",
-                                    unsafe_allow_html=True,
-                                )
+                        else:
+                            seen_urls = {
+                                item["url"] for item in combined_data["all_results"]
+                                if item.get("store") == sname and item.get("url")
+                            }
+                            a, e = _add_products(sname, products, eff_query, seen_urls)
+                            combined_data["store_stats"][sname] = {"total": a, "exact": e}
+                            if ph:
+                                if a > 0:
+                                    ph.markdown(
+                                        f"<div class='progress-store progress-store-done'>"
+                                        f"✅ <strong>{sname}</strong> — {a} result(s) found ({e} exact)</div>",
+                                        unsafe_allow_html=True,
+                                    )
+                                else:
+                                    ph.markdown(
+                                        f"<div class='progress-store progress-store-done'>"
+                                        f"✅ <strong>{sname}</strong> — 0 results</div>",
+                                        unsafe_allow_html=True,
+                                    )
+                return _failed
 
-                failed_stores = still_failing
+            # ── Round 1: all stores in parallel ──────────────────────────────────
+            failed_stores = _run_round(stores, is_final_retry=False)
+
+            # ── Rounds 2 & 3: retry failed stores ────────────────────────────────
+            for retry_num in range(1, 3):
+                if not failed_stores:
+                    break
+                for store in failed_stores:
+                    ph = store_placeholders.get(store["name"])
+                    if ph:
+                        label = "retrying (1 more after this)…" if retry_num == 1 else "final retry…"
+                        ph.markdown(
+                            f"<div class='progress-store progress-store-error'>"
+                            f"⏳ <strong>{store['name']}</strong> — {label}</div>",
+                            unsafe_allow_html=True,
+                        )
+                failed_stores = _run_round(failed_stores, is_final_retry=(retry_num == 2))
 
             # ── Final sort ────────────────────────────────────────────────────────
             combined_data["exact_matches"].sort(key=lambda x: (not x["in_stock"], _m.price_sort_value(x.get("price"))))
