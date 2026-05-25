@@ -846,51 +846,71 @@ def search_public(game_query):
     }
 
     products = []
-    seen_urls = set()
+    public_boardgames_facet = "Παιχνίδια & Παιδικά·ic-games > Επιτραπέζια"
 
-    # Fetch a few pages to avoid missing valid results on later pages.
-    for page in range(1, 4):
-        payload = {
-            "query": game_query,
-            "filters": [],
-            "session_id": session_id,
-            "initial": False,
-            "page": page,
-            "size": 36,
-            "sort": "_score",
-            "dir": "desc",
-        }
-        try:
-            response = _requests.post(
-                "https://app.findbar.io/api/v1/search",
-                json=payload,
-                headers=headers,
-                timeout=15,
-            )
-            if response.status_code != 200:
+    # Try board-game scoped filters first so relevant results are not buried
+    # behind generic categories. Keep a plain-query fallback for resiliency.
+    filter_variants = [
+        [{"field": "auto_category_path", "value": public_boardgames_facet}],
+        [{"field": "auto_category_path", "value": [public_boardgames_facet]}],
+        [],
+    ]
+
+    for filters in filter_variants:
+        products = []
+        seen_urls = set()
+
+        # Fetch several pages because Public search ranking can shift per query.
+        for page in range(1, 6):
+            payload = {
+                "query": game_query,
+                "filters": filters,
+                "session_id": session_id,
+                "initial": False,
+                "page": page,
+                "size": 36,
+                "sort": "_score",
+                "dir": "desc",
+            }
+
+            # Mirrors the board-games-only Public search URL behavior.
+            if filters:
+                payload["lmp"] = 1
+
+            try:
+                response = _requests.post(
+                    "https://app.findbar.io/api/v1/search",
+                    json=payload,
+                    headers=headers,
+                    timeout=15,
+                )
+                if response.status_code != 200:
+                    break
+            except Exception:
                 break
-        except Exception:
-            break
 
-        page_products = parse_public_html(response.text, game_query)
-        if not page_products:
-            if page == 1:
-                return []
-            break
+            page_products = parse_public_html(response.text, game_query)
+            if not page_products:
+                if page == 1:
+                    break
+                break
 
-        added_this_page = 0
-        for p in page_products:
-            p_url = p.get("url", "")
-            if not p_url or p_url in seen_urls:
-                continue
-            seen_urls.add(p_url)
-            products.append(p)
-            added_this_page += 1
+            added_this_page = 0
+            for p in page_products:
+                p_url = p.get("url", "")
+                if not p_url or p_url in seen_urls:
+                    continue
+                seen_urls.add(p_url)
+                products.append(p)
+                added_this_page += 1
 
-        if added_this_page == 0:
-            break
+            if added_this_page == 0:
+                break
 
-    return products
+        if products:
+            return products
+
+    return []
 
 # Non-board-game product-type keywords for The Game Rules.
 # Products whose names contain any of these are filtered out.
@@ -4861,7 +4881,7 @@ def search_game_structured(game_query):
         {"name": "The Dragonphoenix Inn", "url": f"https://innkeeper.gr/?s={encoded_query}&post_type=product&dgwt_wcas=1"},
         {"name": "Lex Hobby Store", "url": f"https://www.skroutz.gr/c/259/epitrapezia/shop/29102/Lex-Hobby-Store.html?keyphrase={encoded_query}"},
         {"name": "GenX", "url": f"https://www.genx.gr/index.php?act=viewCat&searchStr={encoded_query}"},
-        {"name": "Public", "url": f"https://www.public.gr/search/?text={encoded_query}&type=product"},
+        {"name": "Public", "url": f"https://www.public.gr/search?q={encoded_query}&lmp=1&facetFilters=%5B%5B%22auto_category_path:%CE%A0%CE%B1%CE%B9%CF%87%CE%BD%CE%AF%CE%B4%CE%B9%CE%B1%20%26%20%CE%A0%CE%B1%CE%B9%CE%B4%CE%B9%CE%BA%CE%AC%C2%B7ic-games%20%3E%20%CE%95%CF%80%CE%B9%CF%84%CF%81%CE%B1%CF%80%CE%AD%CE%B6%CE%B9%CE%B1%22%5D%5D"},
         {"name": "VP shop", "url": f"https://shop.vpsaga.com/?s={encoded_query}&post_type=product"},
         {"name": "kiddylab", "url": f"https://www.kiddylab.gr/search-results?s={encoded_query}"},
         {"name": "Avalon Games", "url": f"https://avalongames.gr/index.php?route=product/search&search={encoded_query}&description=true"},
