@@ -94,6 +94,14 @@ def price_sort_value(price_value):
         return float('inf')
 
 # Initialize
+if not FIRECRAWL_API_KEY:
+    raise RuntimeError(
+        "FIRECRAWL_API_KEY is not configured. Add it to .streamlit/secrets.toml "
+        "for local runs, or to the Secrets panel in the Streamlit Cloud app "
+        "settings when deployed. An environment variable of the same name also "
+        "works for running this scraper outside Streamlit."
+    )
+
 app = Firecrawl(api_key=FIRECRAWL_API_KEY)
 
 class BoardGame(BaseModel):
