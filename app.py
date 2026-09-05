@@ -1172,29 +1172,10 @@ if run_search and current_query:
                 "all_results": [],
                 "store_stats": {},
             }
-            # Stores served by direct HTTP requests — no Firecrawl needed
-            DIRECT_STORES = frozenset([
-                "eFantasy", "Public", "Ozon.gr", "RollnPlay",
-                "Meeple Planet", "Crystal Lotus", "Gaming Galaxy", "The Dragonphoenix Inn",
-                "GenX",
-            ])
-
             # Max 2 simultaneous Firecrawl API calls. Per-minute pacing is enforced
             # centrally by _firecrawl_limiter in BoardGame-Broke.py; this just caps
             # how many browser scrapes are open at once.
             firecrawl_sem = threading.Semaphore(2)
-
-            # ── dispatch: direct HTTP request ────────────────────────────────────
-            def _direct_call(sname, query):
-                if sname == "Ozon.gr":               return _m.search_ozon(query)
-                if sname == "eFantasy":              return _m.search_efantasy(query)
-                if sname == "RollnPlay":             return _m.search_rollnplay(query)
-                if sname == "Meeple Planet":         return _m.search_meepleplanet(query)
-                if sname == "Crystal Lotus":         return _m.search_crystallotus(query)
-                if sname == "Gaming Galaxy":         return _m.search_gaminggalaxy(query)
-                if sname == "The Dragonphoenix Inn": return _m.search_dragonphoenixinn(query)
-                if sname == "GenX":                  return _m.search_genx(query)
-                return _m.search_public(query)
 
             # ── dispatch: HTML/markdown content parser ───────────────────────────
             def _parse_content(sname, content, query):
@@ -1283,10 +1264,14 @@ if run_search and current_query:
             # ── worker: all I/O + parsing for one store, returns isolated results ─
             def _store_worker(store, sem):
                 sname = store["name"]
+                # Which stores skip Firecrawl is decided by the registry in
+                # BoardGame-Broke.py (DIRECT_SEARCH_FUNCS), so both entry points
+                # stay in sync and BGB_FORCE_FIRECRAWL can pin one back at runtime.
+                direct_call = _m.get_direct_search_func(sname)
                 try:
-                    if sname in DIRECT_STORES:
+                    if direct_call is not None:
                         # --- Direct HTTP path ---
-                        raw = _direct_call(sname, game_query)
+                        raw = direct_call(game_query)
                         eff_query = game_query
 
                         # Apostrophe fallback (re-fetch with variant query)
@@ -1297,7 +1282,7 @@ if run_search and current_query:
                                     mq = mq.replace(ap2, ap_char)
                                 if mq == game_query:
                                     continue
-                                raw = _direct_call(sname, mq)
+                                raw = direct_call(mq)
                                 if raw:
                                     eff_query = mq
                                     break
@@ -1306,7 +1291,7 @@ if run_search and current_query:
                         if not raw and ":" in game_query:
                             qc = game_query.replace(":", "").strip()
                             if qc and qc != game_query:
-                                raw = _direct_call(sname, qc)
+                                raw = direct_call(qc)
                                 if raw:
                                     eff_query = qc
 
@@ -1314,7 +1299,7 @@ if run_search and current_query:
                         if not raw and any(ch in game_query for ch in _m.DASH_VARIANTS):
                             qd = _m.strip_dash_variants(game_query)
                             if qd and qd != game_query:
-                                raw = _direct_call(sname, qd)
+                                raw = direct_call(qd)
                                 if raw:
                                     eff_query = qd
 
