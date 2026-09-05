@@ -5094,10 +5094,16 @@ def _search_paged_html(parser, game_query, page_url, referer=None, max_pages=4):
         if added_this_page == 0:
             break
 
+        # Next-page markers across the platforms in use: WooCommerce (/page/N/
+        # and ?paged=N), OpenCart (&page=N) and CS-Cart (/page-N/). A false
+        # positive only costs one extra request, which then adds nothing and
+        # stops the loop.
         page_lower = response.text.lower()
         has_next_page = (
             f'/page/{page + 1}/' in page_lower or
+            f'page-{page + 1}/' in page_lower or
             f'paged={page + 1}' in page_lower or
+            f'page={page + 1}' in page_lower or
             'next page-numbers' in page_lower
         )
         if not has_next_page:
@@ -5163,6 +5169,84 @@ def search_kiddylab(game_query):
     )
 
 
+def search_thegamerules(game_query):
+    """Search The Game Rules over plain HTTP (OpenCart, &page=N pagination)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_thegamerules_html, game_query,
+        lambda page: (
+            "https://www.thegamerules.com/index.php?route=product/search"
+            f"&search={q}&description=true" + ("" if page == 1 else f"&page={page}")
+        ),
+        referer="https://www.thegamerules.com/",
+    )
+
+
+def search_avalongames(game_query):
+    """Search Avalon Games over plain HTTP (OpenCart, &page=N pagination)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_avalongames_html, game_query,
+        lambda page: (
+            "https://avalongames.gr/index.php?route=product/search"
+            f"&search={q}&description=true" + ("" if page == 1 else f"&page={page}")
+        ),
+        referer="https://avalongames.gr/",
+    )
+
+
+def search_epitrapezio(game_query):
+    """Search epitrapez.io over plain HTTP (WooCommerce search pages)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_epitrapezio_html, game_query,
+        lambda page: "https://epitrapez.io/{}?s={}&post_type=product&dgwt_wcas=1".format(
+            "" if page == 1 else f"page/{page}/", q),
+        referer="https://epitrapez.io/",
+    )
+
+
+def search_nerdom(game_query):
+    """Search Nerdom over plain HTTP (&page=N pagination)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_nerdom_html, game_query,
+        lambda page: f"https://www.nerdom.gr/el/search?keyword={q}"
+                     + ("" if page == 1 else f"&page={page}"),
+        referer="https://www.nerdom.gr/",
+    )
+
+
+def search_fantasyshop(game_query):
+    """Search Fantasy Shop over plain HTTP (CS-Cart, /page-N/ pagination)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_fantasyshop_html, game_query,
+        lambda page: (
+            "https://www.fantasy-shop.gr/epitrapezia-paixnidia/"
+            + ("" if page == 1 else f"page-{page}/")
+            + f"?dispatch=products.search&q={q}&search_performed=Y&subcats=Y"
+        ),
+        referer="https://www.fantasy-shop.gr/",
+    )
+
+
+def search_fantasygate(game_query):
+    """Search Fantasy Gate over plain HTTP.
+
+    The search endpoint returns a single capped result set with no pagination
+    links of any kind, so there is only ever one page to fetch — same as what
+    the Firecrawl path retrieved.
+    """
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_fantasygate_html, game_query,
+        lambda page: f"https://www.fantasygate.gr/search/result?search={q}",
+        referer="https://www.fantasygate.gr/",
+        max_pages=1,
+    )
+
+
 # ── Store transport selection ────────────────────────────────────────────────
 # Stores mapped here are fetched with plain HTTP instead of Firecrawl, because
 # their search results are server-rendered and the existing parsers handle the
@@ -5192,6 +5276,12 @@ DIRECT_SEARCH_FUNCS = {
     "Boards of Madness": search_boardsofmadness,
     "VP shop": search_vpshop,
     "kiddylab": search_kiddylab,
+    "The Game Rules": search_thegamerules,
+    "Fantasy Shop": search_fantasyshop,
+    "epitrapez.io": search_epitrapezio,
+    "Nerdom": search_nerdom,
+    "Avalon Games": search_avalongames,
+    "Fantasy Gate": search_fantasygate,
 }
 
 
