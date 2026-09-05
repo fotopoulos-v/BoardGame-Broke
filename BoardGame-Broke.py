@@ -9,7 +9,7 @@ import unicodedata
 import threading
 import time
 from collections import deque
-from config import FIRECRAWL_API_KEY
+from config import FIRECRAWL_API_KEY, get_secret
 import json
 import html as _html
 
@@ -5048,6 +5048,266 @@ def search_genx(game_query):
     return products
 
 
+# ── Shared direct-HTTP search helper ─────────────────────────────────────────
+_DIRECT_HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept-Language": "el-GR,el;q=0.9,en;q=0.8",
+}
+
+
+def _search_paged_html(parser, game_query, page_url, referer=None, max_pages=4):
+    """Fetch successive search-result pages over plain HTTP and parse each one.
+
+    *page_url(page)* returns the URL for a 1-based page number. Paging stops when
+    a request fails, a page adds no new products, or no next-page marker is left.
+    Used by the stores whose search results are server-rendered, so they need no
+    Firecrawl call at all.
+    """
+    import requests as _requests
+    import time as _time
+
+    headers = dict(_DIRECT_HTTP_HEADERS)
+    if referer:
+        headers["Referer"] = referer
+
+    products = []
+    seen_urls = set()
+    session = _requests.Session()
+
+    for page in range(1, max_pages + 1):
+        try:
+            response = session.get(page_url(page), headers=headers, timeout=15)
+            if response.status_code != 200:
+                break
+        except Exception:
+            break
+
+        added_this_page = 0
+        for p in parser(response.text, game_query):
+            p_url = p.get('url', '')
+            if not p_url or p_url in seen_urls:
+                continue
+            seen_urls.add(p_url)
+            products.append(p)
+            added_this_page += 1
+
+        if added_this_page == 0:
+            break
+
+        # Next-page markers across the platforms in use: WooCommerce (/page/N/
+        # and ?paged=N), OpenCart (&page=N) and CS-Cart (/page-N/). A false
+        # positive only costs one extra request, which then adds nothing and
+        # stops the loop.
+        page_lower = response.text.lower()
+        has_next_page = (
+            f'/page/{page + 1}/' in page_lower or
+            f'page-{page + 1}/' in page_lower or
+            f'paged={page + 1}' in page_lower or
+            f'page={page + 1}' in page_lower or
+            'next page-numbers' in page_lower
+        )
+        if not has_next_page:
+            break
+        if page < max_pages:
+            _time.sleep(0.25)
+
+    return products
+
+
+def search_meepleonboard(game_query):
+    """Search Meeple On Board over plain HTTP (WooCommerce search pages)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_meepleonboard_html, game_query,
+        lambda page: "https://meepleonboard.gr/{}?s={}&post_type=product".format(
+            "" if page == 1 else f"page/{page}/", q),
+        referer="https://meepleonboard.gr/",
+    )
+
+
+def search_playceshop(game_query):
+    """Search PlayceShop over plain HTTP (WooCommerce search pages)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_playceshop_html, game_query,
+        lambda page: "https://shop.playce.gr/{}?s={}&post_type=product&dgwt_wcas=1".format(
+            "" if page == 1 else f"page/{page}/", q),
+        referer="https://shop.playce.gr/",
+    )
+
+
+def search_boardsofmadness(game_query):
+    """Search Boards of Madness over plain HTTP (WooCommerce search pages)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_boardsofmadness_html, game_query,
+        lambda page: "https://boardsofmadness.com/{}?s={}&post_type=product&dgwt_wcas=1".format(
+            "" if page == 1 else f"page/{page}/", q),
+        referer="https://boardsofmadness.com/",
+    )
+
+
+def search_vpshop(game_query):
+    """Search VP shop over plain HTTP (WooCommerce search pages)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_vpshop_html, game_query,
+        lambda page: "https://shop.vpsaga.com/{}?s={}&post_type=product".format(
+            "" if page == 1 else f"page/{page}/", q),
+        referer="https://shop.vpsaga.com/",
+    )
+
+
+def search_kiddylab(game_query):
+    """Search kiddylab over plain HTTP (WooCommerce, ?paged=N pagination)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_kiddylab_html, game_query,
+        lambda page: "https://www.kiddylab.gr/search-results/?s={}{}".format(
+            q, "" if page == 1 else f"&paged={page}"),
+        referer="https://www.kiddylab.gr/",
+    )
+
+
+def search_thegamerules(game_query):
+    """Search The Game Rules over plain HTTP (OpenCart, &page=N pagination)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_thegamerules_html, game_query,
+        lambda page: (
+            "https://www.thegamerules.com/index.php?route=product/search"
+            f"&search={q}&description=true" + ("" if page == 1 else f"&page={page}")
+        ),
+        referer="https://www.thegamerules.com/",
+    )
+
+
+def search_avalongames(game_query):
+    """Search Avalon Games over plain HTTP (OpenCart, &page=N pagination)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_avalongames_html, game_query,
+        lambda page: (
+            "https://avalongames.gr/index.php?route=product/search"
+            f"&search={q}&description=true" + ("" if page == 1 else f"&page={page}")
+        ),
+        referer="https://avalongames.gr/",
+    )
+
+
+def search_epitrapezio(game_query):
+    """Search epitrapez.io over plain HTTP (WooCommerce search pages)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_epitrapezio_html, game_query,
+        lambda page: "https://epitrapez.io/{}?s={}&post_type=product&dgwt_wcas=1".format(
+            "" if page == 1 else f"page/{page}/", q),
+        referer="https://epitrapez.io/",
+    )
+
+
+def search_nerdom(game_query):
+    """Search Nerdom over plain HTTP (&page=N pagination)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_nerdom_html, game_query,
+        lambda page: f"https://www.nerdom.gr/el/search?keyword={q}"
+                     + ("" if page == 1 else f"&page={page}"),
+        referer="https://www.nerdom.gr/",
+    )
+
+
+def search_fantasyshop(game_query):
+    """Search Fantasy Shop over plain HTTP (CS-Cart, /page-N/ pagination)."""
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_fantasyshop_html, game_query,
+        lambda page: (
+            "https://www.fantasy-shop.gr/epitrapezia-paixnidia/"
+            + ("" if page == 1 else f"page-{page}/")
+            + f"?dispatch=products.search&q={q}&search_performed=Y&subcats=Y"
+        ),
+        referer="https://www.fantasy-shop.gr/",
+    )
+
+
+def search_fantasygate(game_query):
+    """Search Fantasy Gate over plain HTTP.
+
+    The search endpoint returns a single capped result set with no pagination
+    links of any kind, so there is only ever one page to fetch — same as what
+    the Firecrawl path retrieved.
+    """
+    q = urllib.parse.quote_plus(game_query)
+    return _search_paged_html(
+        parse_fantasygate_html, game_query,
+        lambda page: f"https://www.fantasygate.gr/search/result?search={q}",
+        referer="https://www.fantasygate.gr/",
+        max_pages=1,
+    )
+
+
+# ── Store transport selection ────────────────────────────────────────────────
+# Stores mapped here are fetched with plain HTTP instead of Firecrawl, because
+# their search results are server-rendered and the existing parsers handle the
+# raw HTML unchanged.
+#
+# Nothing about the Firecrawl path is removed: every one of these stores still
+# has its URL in the store list and its parser in the Firecrawl dispatch, so a
+# store can be put back on Firecrawl in one of two ways:
+#
+#   * permanently — delete its line from this map, or
+#   * without a code change or redeploy — name it in the BGB_FORCE_FIRECRAWL
+#     secret / environment variable (comma-separated store names, or "*" for
+#     all of them). Useful when a site changes its markup and the direct
+#     parser starts coming back empty.
+DIRECT_SEARCH_FUNCS = {
+    "Ozon.gr": search_ozon,
+    "eFantasy": search_efantasy,
+    "Public": search_public,
+    "RollnPlay": search_rollnplay,
+    "Meeple Planet": search_meepleplanet,
+    "Crystal Lotus": search_crystallotus,
+    "Gaming Galaxy": search_gaminggalaxy,
+    "The Dragonphoenix Inn": search_dragonphoenixinn,
+    "GenX": search_genx,
+    "Meeple On Board": search_meepleonboard,
+    "PlayceShop": search_playceshop,
+    "Boards of Madness": search_boardsofmadness,
+    "VP shop": search_vpshop,
+    "kiddylab": search_kiddylab,
+    "The Game Rules": search_thegamerules,
+    "Fantasy Shop": search_fantasyshop,
+    "epitrapez.io": search_epitrapezio,
+    "Nerdom": search_nerdom,
+    "Avalon Games": search_avalongames,
+    "Fantasy Gate": search_fantasygate,
+}
+
+
+def _parse_forced_firecrawl(raw):
+    """Parse the BGB_FORCE_FIRECRAWL setting into a set of store names."""
+    names = {part.strip().lower() for part in (raw or "").split(",")}
+    return {n for n in names if n}
+
+
+FORCED_FIRECRAWL_STORES = _parse_forced_firecrawl(get_secret("BGB_FORCE_FIRECRAWL"))
+
+
+def get_direct_search_func(store_name):
+    """Return the direct-HTTP search function for *store_name*.
+
+    Returns None when the store should go through Firecrawl instead — either
+    because it has no direct implementation, or because BGB_FORCE_FIRECRAWL
+    pins it back onto Firecrawl.
+    """
+    if "*" in FORCED_FIRECRAWL_STORES:
+        return None
+    if store_name.lower() in FORCED_FIRECRAWL_STORES:
+        return None
+    return DIRECT_SEARCH_FUNCS.get(store_name)
+
+
 def search_game_structured(game_query):
     """Search for a board game across multiple Greek stores"""
     encoded_query = urllib.parse.quote_plus(game_query)
@@ -5089,27 +5349,11 @@ def search_game_structured(game_query):
 
     for store in stores:
         store_name = store['name']
-        # These stores are served by direct HTTP requests — no Firecrawl needed
-        if store_name in ["eFantasy", "Public", "Ozon.gr", "RollnPlay", "Meeple Planet", "Crystal Lotus", "Gaming Galaxy", "The Dragonphoenix Inn", "GenX"]:
+        # Stores with a direct-HTTP implementation skip Firecrawl entirely.
+        direct_search = get_direct_search_func(store_name)
+        if direct_search is not None:
             try:
-                if store_name == "eFantasy":
-                    raw_products = search_efantasy(game_query)
-                elif store_name == "Ozon.gr":
-                    raw_products = search_ozon(game_query)
-                elif store_name == "RollnPlay":
-                    raw_products = search_rollnplay(game_query)
-                elif store_name == "Meeple Planet":
-                    raw_products = search_meepleplanet(game_query)
-                elif store_name == "Crystal Lotus":
-                    raw_products = search_crystallotus(game_query)
-                elif store_name == "Gaming Galaxy":
-                    raw_products = search_gaminggalaxy(game_query)
-                elif store_name == "The Dragonphoenix Inn":
-                    raw_products = search_dragonphoenixinn(game_query)
-                elif store_name == "GenX":
-                    raw_products = search_genx(game_query)
-                else:
-                    raw_products = search_public(game_query)
+                raw_products = direct_search(game_query)
                 valid_store_count = 0
                 exact_count = 0
                 seen_urls_in_store = set()
