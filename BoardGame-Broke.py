@@ -5,6 +5,10 @@ from pydantic import BaseModel, Field
 from typing import List
 import urllib.parse
 import os
+import unicodedata
+import threading
+import time
+from collections import deque
 from config import FIRECRAWL_API_KEY
 import json
 import html as _html
@@ -1238,6 +1242,62 @@ def parse_fantasygate_html(content, game_query):
 
     return products
 
+# The Game Rules states stock as "Διαθεσιμότητα: <label>" next to each product.
+# Labels are compared accent-free and lowercased, so "Άμεση Παράδοση" matches
+# "αμεση παραδοση" and the final sigma in "Εκτός αποθέματος" matches too.
+_TGR_IN_STOCK_LABELS = ('αμεση παραδοση', 'αμεσα διαθεσιμο', 'σε αποθεμα', 'in stock')
+_TGR_OOS_LABELS = ('εκτος αποθεματοσ', 'εξαντλημενο', 'μη διαθεσιμο', 'out of stock')
+_TGR_PREORDER_LABELS = ('προ παραγγελια', 'προπαραγγελια', 'preorder', 'pre order')
+
+
+def _normalize_greek(text):
+    """Lowercase, strip Greek accents, and flatten punctuation for label matching."""
+    if not text:
+        return ""
+    decomposed = unicodedata.normalize('NFD', text.lower())
+    stripped = ''.join(ch for ch in decomposed if not unicodedata.combining(ch))
+    stripped = stripped.replace('ς', 'σ')
+    return ' '.join(re.sub(r'[^0-9a-zα-ω]+', ' ', stripped).split())
+
+
+def _thegamerules_stock(context, anchor=None):
+    """Resolve (is_in_stock, is_preorder) for one The Game Rules product block.
+
+    The storefront prints "Διαθεσιμότητα: <label>" just above each product name,
+    in both the raw HTML and Firecrawl's markdown. *anchor* is the offset of the
+    product name within *context*; the label immediately above it wins so a
+    neighbouring card's availability cannot bleed in. Falls back to scanning the
+    whole block when no such label was captured.
+    """
+    labels = []
+    for m in re.finditer('Διαθεσιμότητα', context, re.IGNORECASE):
+        window = re.split(r'</div>|\n\s*\n', context[m.end():m.end() + 160], maxsplit=1)[0]
+        labels.append((m.start(), _normalize_greek(re.sub(r'<[^>]+>', ' ', window))))
+
+    def _classify(text):
+        if any(tok in text for tok in _TGR_PREORDER_LABELS):
+            return True, True
+        if any(tok in text for tok in _TGR_OOS_LABELS):
+            return False, False
+        if any(tok in text for tok in _TGR_IN_STOCK_LABELS):
+            return True, False
+        return None
+
+    if labels:
+        if anchor is None:
+            candidates = [labels[0][1]]
+        else:
+            before = [label for pos, label in labels if pos <= anchor]
+            candidates = [before[-1]] if before else [labels[0][1]]
+        for label in candidates:
+            verdict = _classify(label)
+            if verdict is not None:
+                return verdict
+
+    verdict = _classify(_normalize_greek(context))
+    return verdict if verdict is not None else (False, False)
+
+
 # Fallback HTML parser for The Game Rules
 def parse_thegamerules_html(content, game_query):
     """Robust parser for The Game Rules: Handles Preorders, Sale Prices, and fuzzy titles."""
@@ -1329,13 +1389,9 @@ def parse_thegamerules_html(content, game_query):
         if price_val is None:
             continue
 
-        # 4. Extract Stock Status
-        # Check both the previous and next blocks for status keywords
-        context = (prev_block + " " + next_block).lower()
-
-        is_preorder = 'preorder' in context
-        is_oos = 'out of stock' in context or 'εξαντλημένο' in context
-        is_in_stock = 'in stock' in context or 'σε απόθεμα' in context or is_preorder
+        # 4. Extract Stock Status from the "Διαθεσιμότητα:" label above the name.
+        context = prev_block + " " + next_block
+        is_in_stock, is_preorder = _thegamerules_stock(context, anchor=len(prev_block))
 
         # 5. Matching Logic (Fuzzy)
         # Check if all normalized query words are in the normalized title.
@@ -1353,7 +1409,7 @@ def parse_thegamerules_html(content, game_query):
         products.append({
             'name': display_name,
             'price': price_val,
-            'is_in_stock': is_in_stock and not is_oos,
+            'is_in_stock': is_in_stock,
             'url': url
         })
         seen_urls.add(url)
@@ -1390,21 +1446,15 @@ def parse_thegamerules_html(content, game_query):
         if price_val is None:
             continue
 
-        context_lower = local_context.lower()
-        is_preorder = 'preorder' in context_lower or 'προπαραγγελία' in context_lower
-        is_oos = 'out of stock' in context_lower or 'εξαντλημένο' in context_lower
-        is_in_stock = (
-            'in stock' in context_lower or
-            'σε απόθεμα' in context_lower or
-            'c--stock-label' in context_lower or
-            is_preorder
+        is_in_stock, is_preorder = _thegamerules_stock(
+            local_context, anchor=match.start() - local_start
         )
 
         display_name = f"[Preorder] {name}" if is_preorder else name
         products.append({
             'name': display_name,
             'price': price_val,
-            'is_in_stock': is_in_stock and not is_oos,
+            'is_in_stock': is_in_stock,
             'url': url
         })
         seen_urls.add(url)
@@ -4493,6 +4543,79 @@ def parse_genx_html(content, game_query):
 
     return products
 
+# ── Firecrawl pacing ──────────────────────────────────────────────────────────
+# Firecrawl enforces a per-minute scrape quota (~20 req/min on the current plan;
+# exceeding it returns "Rate limit exceeded. Consumed (req/min)"). One search
+# fans out over ~20 Firecrawl-backed stores, so without pacing a single run sits
+# right at the ceiling and the retry rounds push it over. This limiter keeps the
+# whole process under FIRECRAWL_MAX_RPM regardless of how many threads scrape.
+# The observed allowance drifts between roughly 11 and 22 req/min, so this sits
+# deliberately below the low end; the 429 handling below covers the rest.
+FIRECRAWL_MAX_RPM = 15
+
+_RETRY_AFTER_RE = re.compile(r'retry after\s*(\d+)\s*s', re.IGNORECASE)
+
+
+class _RateLimiter:
+    """Process-wide limiter: at most *max_calls* per *period*, evenly spaced.
+
+    The even spacing matters as much as the cap. A plain sliding window lets the
+    first *max_calls* fire in the same instant, and Firecrawl still answers that
+    burst with a 429 — so consecutive calls are also held *period / max_calls*
+    apart, which keeps the request stream smooth instead of spiky.
+    """
+
+    def __init__(self, max_calls, period=60.0):
+        self.max_calls = max_calls
+        self.period = period
+        self.min_interval = period / float(max_calls)
+        self._calls = deque()
+        self._last_call = 0.0
+        self._blocked_until = 0.0
+        self._lock = threading.Lock()
+
+    def acquire(self):
+        """Block until a request slot is free, then claim it."""
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                wait = max(
+                    self._blocked_until - now,
+                    self._last_call + self.min_interval - now,
+                )
+                if wait <= 0:
+                    while self._calls and now - self._calls[0] >= self.period:
+                        self._calls.popleft()
+                    if len(self._calls) < self.max_calls:
+                        self._calls.append(now)
+                        self._last_call = now
+                        return
+                    wait = self.period - (now - self._calls[0])
+            # Cap each sleep so a pause lifted early is noticed promptly.
+            time.sleep(min(max(wait, 0.05), 5.0))
+
+    def pause(self, seconds):
+        """Hold back every caller for *seconds* — used when the API reports a 429."""
+        with self._lock:
+            self._blocked_until = max(self._blocked_until, time.monotonic() + seconds)
+
+
+_firecrawl_limiter = _RateLimiter(FIRECRAWL_MAX_RPM)
+
+
+def _is_rate_limit_error(error_msg):
+    lowered = error_msg.lower()
+    return 'rate limit' in lowered or '429' in lowered
+
+
+def _rate_limit_delay(error_msg):
+    """Seconds to wait after a 429, from Firecrawl's own 'retry after Ns' hint."""
+    match = _RETRY_AFTER_RE.search(error_msg)
+    if match:
+        return min(int(match.group(1)) + 2, 70)
+    return 30
+
+
 # scrape with retry logic
 def scrape_with_retry(app, url, store_name, max_retries=3, use_html_fallback=False):
     """Scrape with retry logic and exponential backoff"""
@@ -4512,6 +4635,8 @@ def scrape_with_retry(app, url, store_name, max_retries=3, use_html_fallback=Fal
                 timeout = 60000 + (attempt * 30000)
                 wait_time = 4000 + (attempt * 2000)
                 actions = [{"type": "wait", "milliseconds": wait_time}]
+
+            _firecrawl_limiter.acquire()
 
             if use_html_fallback:
                 result = app.scrape(
@@ -4538,6 +4663,15 @@ def scrape_with_retry(app, url, store_name, max_retries=3, use_html_fallback=Fal
 
         except Exception as e:
             error_msg = str(e)
+
+            # A 429 is about our own pacing, not this store: hold every thread
+            # back until Firecrawl's stated reset so the retry can succeed.
+            if _is_rate_limit_error(error_msg):
+                _firecrawl_limiter.pause(_rate_limit_delay(error_msg))
+                if attempt < max_retries - 1:
+                    continue
+                return None, error_msg
+
             # For Ozon, don't retry on timeout
             if store_name == "Ozon.gr":
                 return None, error_msg
@@ -4853,6 +4987,59 @@ def search_dragonphoenixinn(game_query):
     return products
 
 
+def search_genx(game_query):
+    """Search GenX across multiple result pages using raw HTML.
+
+    genx.gr renders its product grid server-side, so plain requests work and are
+    far more reliable than Firecrawl, whose browser engines are blocked by the
+    site's CDN ("All scraping engines failed to retrieve content from this URL").
+    """
+    import requests as _requests
+    import time as _time
+
+    encoded_query = urllib.parse.quote_plus(game_query)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept-Language": "el-GR,el;q=0.9,en;q=0.8",
+        "Referer": "https://www.genx.gr/",
+    }
+
+    products = []
+    seen_urls = set()
+    session = _requests.Session()
+
+    for page in range(1, 5):
+        url = f"https://www.genx.gr/index.php?act=viewCat&searchStr={encoded_query}"
+        if page > 1:
+            url += f"&page={page}"
+
+        try:
+            response = session.get(url, headers=headers, timeout=15)
+            if response.status_code != 200:
+                break
+        except Exception:
+            break
+
+        for p in parse_genx_html(response.text, game_query):
+            p_url = p.get('url', '')
+            if not p_url or p_url in seen_urls:
+                continue
+            seen_urls.add(p_url)
+            products.append(p)
+
+        # GenX searches span all departments, so a page of non-board-game hits
+        # yields nothing here while later pages may still hold board games.
+        # Stop only when the page had no product cards at all.
+        if 'product-loop-viewCat' not in response.text:
+            break
+        if f"data-pagetogo='{page + 1}'" not in response.text:
+            break
+        if page < 4:
+            _time.sleep(0.25)
+
+    return products
+
+
 def search_game_structured(game_query):
     """Search for a board game across multiple Greek stores"""
     encoded_query = urllib.parse.quote_plus(game_query)
@@ -4894,8 +5081,8 @@ def search_game_structured(game_query):
 
     for store in stores:
         store_name = store['name']
-        # eFantasy, Public, Ozon.gr, RollnPlay, Meeple Planet, Crystal Lotus, Gaming Galaxy, and The Dragonphoenix Inn use direct requests
-        if store_name in ["eFantasy", "Public", "Ozon.gr", "RollnPlay", "Meeple Planet", "Crystal Lotus", "Gaming Galaxy", "The Dragonphoenix Inn"]:
+        # These stores are served by direct HTTP requests — no Firecrawl needed
+        if store_name in ["eFantasy", "Public", "Ozon.gr", "RollnPlay", "Meeple Planet", "Crystal Lotus", "Gaming Galaxy", "The Dragonphoenix Inn", "GenX"]:
             try:
                 if store_name == "eFantasy":
                     raw_products = search_efantasy(game_query)
@@ -4911,6 +5098,8 @@ def search_game_structured(game_query):
                     raw_products = search_gaminggalaxy(game_query)
                 elif store_name == "The Dragonphoenix Inn":
                     raw_products = search_dragonphoenixinn(game_query)
+                elif store_name == "GenX":
+                    raw_products = search_genx(game_query)
                 else:
                     raw_products = search_public(game_query)
                 valid_store_count = 0

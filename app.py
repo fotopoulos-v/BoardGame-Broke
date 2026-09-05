@@ -1176,9 +1176,12 @@ if run_search and current_query:
             DIRECT_STORES = frozenset([
                 "eFantasy", "Public", "Ozon.gr", "RollnPlay",
                 "Meeple Planet", "Crystal Lotus", "Gaming Galaxy", "The Dragonphoenix Inn",
+                "GenX",
             ])
 
-            # Max 2 simultaneous Firecrawl API calls to avoid rate-limiting
+            # Max 2 simultaneous Firecrawl API calls. Per-minute pacing is enforced
+            # centrally by _firecrawl_limiter in BoardGame-Broke.py; this just caps
+            # how many browser scrapes are open at once.
             firecrawl_sem = threading.Semaphore(2)
 
             # ── dispatch: direct HTTP request ────────────────────────────────────
@@ -1190,6 +1193,7 @@ if run_search and current_query:
                 if sname == "Crystal Lotus":         return _m.search_crystallotus(query)
                 if sname == "Gaming Galaxy":         return _m.search_gaminggalaxy(query)
                 if sname == "The Dragonphoenix Inn": return _m.search_dragonphoenixinn(query)
+                if sname == "GenX":                  return _m.search_genx(query)
                 return _m.search_public(query)
 
             # ── dispatch: HTML/markdown content parser ───────────────────────────
