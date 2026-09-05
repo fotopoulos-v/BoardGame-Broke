@@ -5217,16 +5217,35 @@ def search_nerdom(game_query):
     )
 
 
-def search_fantasyshop(game_query):
-    """Search Fantasy Shop over plain HTTP (CS-Cart, /page-N/ pagination)."""
+# CS-Cart category id for "Επιτραπέζια Παιχνίδια" (board games) on Fantasy Shop.
+# Scoping the search by this id is what keeps Funko Pops, card sleeves and
+# miniatures out of the results.
+FANTASYSHOP_BOARDGAMES_CID = 288
+
+
+def build_fantasyshop_search_url(game_query, page=1):
+    """Build a Fantasy Shop search URL scoped to the board-games category.
+
+    The category must be selected with the ``cid`` query parameter rather than
+    the ``/epitrapezia-paixnidia/`` SEO path: searching through that path now
+    returns an empty result set for every query, while the same search from the
+    site root with ``cid`` returns what the storefront's own search box does.
+    ``search_performed=Y`` is required too — without it the search returns
+    nothing. The ``security_hash`` the site appends is not needed.
+    """
     q = urllib.parse.quote_plus(game_query)
+    url = (
+        "https://www.fantasy-shop.gr/?dispatch=products.search&search_performed=Y"
+        f"&q={q}&cid={FANTASYSHOP_BOARDGAMES_CID}&subcats=Y"
+    )
+    return url if page == 1 else f"{url}&page={page}"
+
+
+def search_fantasyshop(game_query):
+    """Search Fantasy Shop over plain HTTP (CS-Cart, &page=N pagination)."""
     return _search_paged_html(
         parse_fantasyshop_html, game_query,
-        lambda page: (
-            "https://www.fantasy-shop.gr/epitrapezia-paixnidia/"
-            + ("" if page == 1 else f"page-{page}/")
-            + f"?dispatch=products.search&q={q}&search_performed=Y&subcats=Y"
-        ),
+        lambda page: build_fantasyshop_search_url(game_query, page),
         referer="https://www.fantasy-shop.gr/",
     )
 
@@ -5315,7 +5334,7 @@ def search_game_structured(game_query):
         {"name": "Ozon.gr", "url": f"https://www.ozon.gr/instantsearchplus/result/?q={encoded_query}"},
         {"name": "Meeple On Board", "url": f"https://meepleonboard.gr/?s={encoded_query}&post_type=product"},
         {"name": "The Game Rules", "url": f"https://www.thegamerules.com/index.php?route=product/search&search={encoded_query}&description=true"},
-        {"name": "Fantasy Shop", "url": f"https://www.fantasy-shop.gr/epitrapezia-paixnidia/?dispatch=products.search&q={encoded_query}&search_performed=Y&subcats=Y"},
+        {"name": "Fantasy Shop", "url": build_fantasyshop_search_url(game_query)},
         {"name": "Boards of Madness", "url": f"https://boardsofmadness.com/?s={encoded_query}&post_type=product&dgwt_wcas=1"},
         {"name": "Nerdom", "url": f"https://www.nerdom.gr/el/search?keyword={encoded_query}"},
         {"name": "eFantasy", "url": f"https://www.efantasy.gr/el/search-results?αναζήτηση={encoded_query}"},

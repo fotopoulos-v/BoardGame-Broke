@@ -1137,7 +1137,7 @@ if run_search and current_query:
                 {"name": "Ozon.gr",          "url": f"https://www.ozon.gr/instantsearchplus/result/?q={encoded_query}"},
                 {"name": "Meeple On Board",  "url": f"https://meepleonboard.gr/?s={encoded_query}&post_type=product"},
                 {"name": "The Game Rules",   "url": f"https://www.thegamerules.com/index.php?route=product/search&search={encoded_query}&description=true"},
-                {"name": "Fantasy Shop",     "url": f"https://www.fantasy-shop.gr/epitrapezia-paixnidia/?dispatch=products.search&q={encoded_query}&search_performed=Y&subcats=Y"},
+                {"name": "Fantasy Shop",     "url": _m.build_fantasyshop_search_url(game_query)},
                 {"name": "Boards of Madness","url": f"https://boardsofmadness.com/?s={encoded_query}&post_type=product&dgwt_wcas=1"},
                 {"name": "Nerdom",           "url": f"https://www.nerdom.gr/el/search?keyword={encoded_query}"},
                 {"name": "eFantasy",         "url": f"https://www.efantasy.gr/el/search-results?αναζήτηση={encoded_query}"},
