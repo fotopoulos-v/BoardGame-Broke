@@ -96,6 +96,28 @@ SUPABASE_SERVICE_ROLE_KEY = "<your-service-role-key>"
 SUPABASE_EVENTS_TABLE = "usage_events"
 ```
 
+## Configuration
+
+The Firecrawl API key is **required** — the app will not start without it. It is
+never stored in the repository; `config.py` resolves it at runtime from Streamlit
+secrets first, then from an environment variable of the same name.
+
+**Streamlit Cloud:** add it under *App settings → Secrets*:
+
+```toml
+FIRECRAWL_API_KEY = "<your-firecrawl-key>"
+```
+
+**Local development:** put the same line in `.streamlit/secrets.toml` (git-ignored),
+or export it in your shell for running the scraper outside Streamlit:
+
+```bash
+export FIRECRAWL_API_KEY="<your-firecrawl-key>"
+```
+
+The optional `PUBLIC_FINDBAR_BEARER_TOKEN` and `PUBLIC_FINDBAR_SESSION_ID`
+overrides are resolved the same way, and fall back to built-in defaults.
+
 ### 3) Optional runtime flags
 
 ```toml
