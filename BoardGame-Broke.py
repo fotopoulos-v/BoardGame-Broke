@@ -3097,132 +3097,6 @@ def sanitize_lexhobby_name(raw_name):
     return ' '.join(name.split()).strip().lower()
 
 
-def extract_skroutz_store_product_url(content, base_url, anchor_start):
-    """Prefer store-specific Skroutz URL containing product_id for a parsed product card."""
-    if not base_url:
-        return ""
-
-    # Normalize to relative + absolute forms for matching and final output.
-    if base_url.startswith('http'):
-        base_abs = base_url
-        base_rel = re.sub(r'^https?://www\.skroutz\.gr', '', base_url, flags=re.IGNORECASE)
-    else:
-        base_rel = base_url if base_url.startswith('/') else '/' + base_url
-        base_abs = 'https://www.skroutz.gr' + base_rel
-
-    start = max(0, anchor_start - 300)
-    end = min(len(content), anchor_start + 2200)
-    snippet = _html.unescape(content[start:end])
-
-    def choose_closest(candidates):
-        if not candidates:
-            return ""
-        # Prefer links after the anchor; then by nearest distance to the anchor.
-        candidates.sort(key=lambda item: (item[0] < anchor_start, abs(item[0] - anchor_start)))
-        return candidates[0][1]
-
-    # 1) Best match: same product path + product_id query parameter.
-    base_rel_escaped = re.escape(base_rel)
-    same_rel_pattern = re.compile(
-        rf'({base_rel_escaped}\?[^"\'\s<>]*product_id=\d+[^"\'\s<>]*)',
-        re.IGNORECASE
-    )
-    same_abs_pattern = re.compile(
-        rf'(https?://www\.skroutz\.gr{base_rel_escaped}\?[^"\'\s<>]*product_id=\d+[^"\'\s<>]*)',
-        re.IGNORECASE
-    )
-
-    same_candidates = []
-    for match in same_abs_pattern.finditer(snippet):
-        same_candidates.append((start + match.start(), match.group(1)))
-    for match in same_rel_pattern.finditer(snippet):
-        same_candidates.append((start + match.start(), match.group(1)))
-    selected = choose_closest(same_candidates)
-    if selected:
-        return selected if selected.startswith('http') else 'https://www.skroutz.gr' + selected
-
-    # 2) Fallback: any Skroutz product URL with product_id within the local card context.
-    generic_abs_pattern = re.compile(
-        r'(https?://www\.skroutz\.gr/s/[^"\'\s<>?]+/[^"\'\s<>?]+\?[^"\'\s<>]*product_id=\d+[^"\'\s<>]*)',
-        re.IGNORECASE
-    )
-    generic_rel_pattern = re.compile(
-        r'(/s/[^"\'\s<>?]+/[^"\'\s<>?]+\?[^"\'\s<>]*product_id=\d+[^"\'\s<>]*)',
-        re.IGNORECASE
-    )
-    generic_candidates = []
-    for match in generic_abs_pattern.finditer(snippet):
-        generic_candidates.append((start + match.start(), match.group(1)))
-    for match in generic_rel_pattern.finditer(snippet):
-        generic_candidates.append((start + match.start(), match.group(1)))
-    selected = choose_closest(generic_candidates)
-    if selected:
-        return selected if selected.startswith('http') else 'https://www.skroutz.gr' + selected
-
-    return base_abs
-
-# Fallback HTML parser for SoHotTCG
-def parse_sohottcg_html(content, game_query):
-    """HTML parser for SoHotTCG (Skroutz board games shop page)"""
-    if not content:
-        return []
-    products = []
-    seen_urls = set()
-
-    # In scraped content: no <h2> wrapper, absolute URLs, class="js-sku-link" (not "js-sku-link pic")
-    name_pattern = re.compile(
-        r'<a\s[^>]*class="js-sku-link"[^>]*href="((?:https://www\.skroutz\.gr)?/s/[^"?]+)[^"]*"[^>]*>'
-        r'([^<]+)</a>',
-        re.IGNORECASE
-    )
-    price_pattern = re.compile(
-        r'<a[^>]*class="js-sku-link sku-link"[^>]*>([\d,\.]+)\s*€',
-        re.IGNORECASE
-    )
-
-    name_matches = list(name_pattern.finditer(content))
-    price_matches = list(price_pattern.finditer(content))
-
-    price_idx = 0
-    for name_match in name_matches:
-        while price_idx < len(price_matches) and price_matches[price_idx].start() < name_match.start():
-            price_idx += 1
-        if price_idx >= len(price_matches):
-            break
-
-        raw_url = name_match.group(1)
-        url = extract_skroutz_store_product_url(content, raw_url, name_match.start())
-        raw_name = _html.unescape(' '.join(name_match.group(2).split()))
-        price_raw = price_matches[price_idx].group(1).replace(',', '.')
-
-        decoded_game_query = _html.unescape(game_query).lower().replace(':', '').strip()
-        clean_name = sanitize_nolabelx_name(raw_name)
-        clean_name_normalized = ' '.join(clean_name.replace(':', ' ').replace('-', ' ').split())
-        if not all(w in clean_name_normalized for w in decoded_game_query.split()):
-            continue
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-        try:
-            price = float(price_raw)
-        except ValueError:
-            continue
-
-        context_start = max(0, name_match.start() - 100)
-        context_end = min(len(content), price_matches[price_idx].end() + 500)
-        context = content[context_start:context_end]
-        in_stock = 'out-of-stock' not in context.lower() and 'εξαντλημένο' not in context.lower()
-
-        products.append({
-            'name': raw_name,
-            'price': price,
-            'is_in_stock': in_stock,
-            'url': url
-        })
-        price_idx += 1
-
-    return products
-
 # Fallback HTML parser for Mystery Bay (Wix store with JSON warmup data)
 def parse_mysterybay_html(content, game_query):
     """Parser for Mystery Bay (Wix store - uses markdown content)"""
@@ -3288,297 +3162,67 @@ def parse_mysterybay_html(content, game_query):
 
     return products
 
-# Fallback HTML parser for No Label X
-def parse_nolabelx_html(content, game_query):
-    """HTML/markdown parser for No Label X (Skroutz board games shop page)."""
+# HTML parser for the stores listed through their Skroutz shop page
+def parse_skroutz_shop_html(content, game_query):
+    """Parse a Skroutz shop page. Each card's price is that shop's own offer."""
     if not content:
         return []
     products = []
     seen_urls = set()
     query_words = normalize_for_match(_html.unescape(game_query)).split()
 
-    name_pattern = re.compile(
-        r'<a\s[^>]*class="js-sku-link"[^>]*href="((?:https://www\.skroutz\.gr)?/s/[^"?]+)[^"]*"[^>]*>'
-        r'([^<]+)</a>',
-        re.IGNORECASE
-    )
-    price_pattern = re.compile(
-        r'<a[^>]*class="js-sku-link sku-link"[^>]*>([\d,\.]+)\s*€',
-        re.IGNORECASE
-    )
+    card_starts = [
+        m.start() for m in re.finditer(r'<li\b[^>]*\bdata-skuid="\d+"', content, re.IGNORECASE)
+    ]
+    for i, start in enumerate(card_starts):
+        end = card_starts[i + 1] if i + 1 < len(card_starts) else content.find('</ol>', start)
+        card = content[start:end if end != -1 else len(content)]
 
-    name_matches = list(name_pattern.finditer(content))
-    price_matches = list(price_pattern.finditer(content))
-
-    price_idx = 0
-    for name_match in name_matches:
-        while price_idx < len(price_matches) and price_matches[price_idx].start() < name_match.start():
-            price_idx += 1
-        if price_idx >= len(price_matches):
-            break
-
-        raw_url = name_match.group(1)
-        url = extract_skroutz_store_product_url(content, raw_url, name_match.start())
-        raw_name = _html.unescape(' '.join(name_match.group(2).split()))
-        price_raw = price_matches[price_idx].group(1).replace(',', '.')
-
-        clean_name = sanitize_nolabelx_name(raw_name)
-        clean_name_normalized = normalize_for_match(clean_name)
-        if not _query_words_in_text(query_words, clean_name_normalized):
+        title_match = re.search(
+            r'<a\b[^>]*\bclass="[^"]*\bsku-card-title-link\b[^"]*"[^>]*\bhref="([^"]+)"[^>]*>'
+            r'\s*<h2[^>]*>([^<]+)</h2>',
+            card,
+            re.IGNORECASE,
+        )
+        price_match = re.search(
+            r'<a\b[^>]*\bclass="[^"]*\bsku-link\b[^"]*"[^>]*>\s*([\d.,]+)\s*€',
+            card,
+            re.IGNORECASE,
+        )
+        if not title_match or not price_match:
             continue
+
+        raw_name = _html.unescape(' '.join(title_match.group(2).split()))
+        clean_name = normalize_for_match(sanitize_nolabelx_name(raw_name))
+        if not _query_words_in_text(query_words, clean_name):
+            continue
+
+        url = urllib.parse.urljoin("https://www.skroutz.gr", _html.unescape(title_match.group(1)))
         if url in seen_urls:
             continue
-        seen_urls.add(url)
         try:
-            price = float(price_raw)
+            price = float(price_match.group(1).replace('.', '').replace(',', '.'))
         except ValueError:
             continue
 
-        context_start = max(0, name_match.start() - 100)
-        context_end = min(len(content), price_matches[price_idx].end() + 500)
-        context = content[context_start:context_end]
-        in_stock = 'out-of-stock' not in context.lower() and 'εξαντλημένο' not in context.lower()
-
-        products.append({
-            'name': raw_name,
-            'price': price,
-            'is_in_stock': in_stock,
-            'url': url
-        })
-        price_idx += 1
-
-    if products:
-        return products
-
-    # Firecrawl can return transformed markdown-like content for Skroutz pages.
-    md_link_pattern = re.compile(
-        r'\[([^\]]+)\]\(((?:https://www\.skroutz\.gr)?/s/[^\s\)]+)\)',
-        re.IGNORECASE,
-    )
-
-    for name_match in md_link_pattern.finditer(content):
-        raw_name = _html.unescape(' '.join(name_match.group(1).split()))
-        if not raw_name:
-            continue
-        if re.fullmatch(r'[0-9]+(?:[.,][0-9]{2})?\s*€', raw_name):
-            continue
-        if raw_name.lower().startswith('image'):
-            continue
-
-        raw_url = name_match.group(2)
-        url = extract_skroutz_store_product_url(content, raw_url, name_match.start())
-        clean_name = sanitize_nolabelx_name(raw_name)
-        clean_name_normalized = normalize_for_match(clean_name)
-        if not _query_words_in_text(query_words, clean_name_normalized):
-            continue
-        if url in seen_urls:
-            continue
-
-        local_context = content[name_match.end(): min(len(content), name_match.end() + 500)]
-        price_match = re.search(r'([0-9]+(?:[.,][0-9]{2}))\s*€', local_context, re.IGNORECASE)
-        if not price_match:
-            continue
-
-        try:
-            price = float(price_match.group(1).replace(',', '.'))
-        except ValueError:
-            continue
-
-        local_lower = local_context.lower()
-        in_stock = 'out-of-stock' not in local_lower and 'εξαντλη' not in local_lower
-
-        products.append({
-            'name': raw_name,
-            'price': price,
-            'is_in_stock': in_stock,
-            'url': url
-        })
         seen_urls.add(url)
+        card_lower = card.lower()
+        products.append({
+            'name': raw_name,
+            'price': price,
+            'is_in_stock': 'out-of-stock' not in card_lower and 'εξαντλημένο' not in card_lower,
+            'url': url,
+        })
 
     return products
 
-# Fallback HTML parser for Lex Hobby Store
-def parse_lexhobby_html(content, game_query):
-    """HTML parser for Lex Hobby Store (Skroutz board games shop page)"""
-    if not content:
-        return []
-    products = []
-    seen_urls = set()
 
-    name_pattern = re.compile(
-        r'<a\s[^>]*class="js-sku-link"[^>]*href="((?:https://www\.skroutz\.gr)?/s/[^"?]+)[^"]*"[^>]*>'
-        r'([^<]+)</a>',
-        re.IGNORECASE
-    )
-    price_pattern = re.compile(
-        r'<a[^>]*class="js-sku-link sku-link"[^>]*>([\d,\.]+)\s*€',
-        re.IGNORECASE
-    )
+parse_nolabelx_html = parse_skroutz_shop_html
+parse_sohottcg_html = parse_skroutz_shop_html
+parse_techcity_html = parse_skroutz_shop_html
+parse_gametheory_html = parse_skroutz_shop_html
+parse_lexhobby_html = parse_skroutz_shop_html
 
-    name_matches = list(name_pattern.finditer(content))
-    price_matches = list(price_pattern.finditer(content))
-
-    price_idx = 0
-    for name_match in name_matches:
-        while price_idx < len(price_matches) and price_matches[price_idx].start() < name_match.start():
-            price_idx += 1
-        if price_idx >= len(price_matches):
-            break
-
-        raw_url = name_match.group(1)
-        url = extract_skroutz_store_product_url(content, raw_url, name_match.start())
-        raw_name = _html.unescape(' '.join(name_match.group(2).split()))
-        price_raw = price_matches[price_idx].group(1).replace(',', '.')
-
-        decoded_game_query = _html.unescape(game_query).lower().replace(':', '').strip()
-        clean_name = sanitize_lexhobby_name(raw_name)
-        clean_name_normalized = ' '.join(clean_name.replace(':', ' ').replace('-', ' ').split())
-        if not all(w in clean_name_normalized for w in decoded_game_query.split()):
-            continue
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-        try:
-            price = float(price_raw)
-        except ValueError:
-            continue
-
-        context_start = max(0, name_match.start() - 100)
-        context_end = min(len(content), price_matches[price_idx].end() + 500)
-        context = content[context_start:context_end]
-        in_stock = 'out-of-stock' not in context.lower() and 'εξαντλημένο' not in context.lower()
-
-        products.append({
-            'name': raw_name,
-            'price': price,
-            'is_in_stock': in_stock,
-            'url': url
-        })
-        price_idx += 1
-
-    return products
-
-# Fallback HTML parser for Tech City
-def parse_techcity_html(content, game_query):
-    """HTML parser for Tech City (Skroutz board games shop page)"""
-    if not content:
-        return []
-    products = []
-    seen_urls = set()
-
-    name_pattern = re.compile(
-        r'<a\s[^>]*class="js-sku-link"[^>]*href="((?:https://www\.skroutz\.gr)?/s/[^"?]+)[^"]*"[^>]*>'
-        r'([^<]+)</a>',
-        re.IGNORECASE
-    )
-    price_pattern = re.compile(
-        r'<a[^>]*class="js-sku-link sku-link"[^>]*>([\d,\.]+)\s*€',
-        re.IGNORECASE
-    )
-
-    name_matches = list(name_pattern.finditer(content))
-    price_matches = list(price_pattern.finditer(content))
-
-    price_idx = 0
-    for name_match in name_matches:
-        while price_idx < len(price_matches) and price_matches[price_idx].start() < name_match.start():
-            price_idx += 1
-        if price_idx >= len(price_matches):
-            break
-
-        raw_url = name_match.group(1)
-        url = extract_skroutz_store_product_url(content, raw_url, name_match.start())
-        raw_name = _html.unescape(' '.join(name_match.group(2).split()))
-        price_raw = price_matches[price_idx].group(1).replace(',', '.')
-
-        decoded_game_query = _html.unescape(game_query).lower().replace(':', '').strip()
-        clean_name = sanitize_nolabelx_name(raw_name)
-        clean_name_normalized = ' '.join(clean_name.replace(':', ' ').replace('-', ' ').split())
-        if not all(w in clean_name_normalized for w in decoded_game_query.split()):
-            continue
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-        try:
-            price = float(price_raw)
-        except ValueError:
-            continue
-
-        context_start = max(0, name_match.start() - 100)
-        context_end = min(len(content), price_matches[price_idx].end() + 500)
-        context = content[context_start:context_end]
-        in_stock = 'out-of-stock' not in context.lower() and 'εξαντλημένο' not in context.lower()
-
-        products.append({
-            'name': raw_name,
-            'price': price,
-            'is_in_stock': in_stock,
-            'url': url
-        })
-        price_idx += 1
-
-    return products
-
-# Fallback HTML parser for Game Theory
-def parse_gametheory_html(content, game_query):
-    """HTML parser for Game Theory (Skroutz board games shop page)"""
-    if not content:
-        return []
-    products = []
-    seen_urls = set()
-
-    name_pattern = re.compile(
-        r'<a\s[^>]*class="js-sku-link"[^>]*href="((?:https://www\.skroutz\.gr)?/s/[^"?]+)[^"]*"[^>]*>'
-        r'([^<]+)</a>',
-        re.IGNORECASE
-    )
-    price_pattern = re.compile(
-        r'<a[^>]*class="js-sku-link sku-link"[^>]*>([\d,\.]+)\s*€',
-        re.IGNORECASE
-    )
-
-    name_matches = list(name_pattern.finditer(content))
-    price_matches = list(price_pattern.finditer(content))
-
-    price_idx = 0
-    for name_match in name_matches:
-        while price_idx < len(price_matches) and price_matches[price_idx].start() < name_match.start():
-            price_idx += 1
-        if price_idx >= len(price_matches):
-            break
-
-        raw_url = name_match.group(1)
-        url = extract_skroutz_store_product_url(content, raw_url, name_match.start())
-        raw_name = _html.unescape(' '.join(name_match.group(2).split()))
-        price_raw = price_matches[price_idx].group(1).replace(',', '.')
-
-        decoded_game_query = _html.unescape(game_query).lower().replace(':', '').strip()
-        clean_name = sanitize_nolabelx_name(raw_name)
-        clean_name_normalized = ' '.join(clean_name.replace(':', ' ').replace('-', ' ').split())
-        if not all(w in clean_name_normalized for w in decoded_game_query.split()):
-            continue
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-        try:
-            price = float(price_raw)
-        except ValueError:
-            continue
-
-        context_start = max(0, name_match.start() - 100)
-        context_end = min(len(content), price_matches[price_idx].end() + 500)
-        context = content[context_start:context_end]
-        in_stock = 'out-of-stock' not in context.lower() and 'εξαντλημένο' not in context.lower()
-
-        products.append({
-            'name': raw_name,
-            'price': price,
-            'is_in_stock': in_stock,
-            'url': url
-        })
-        price_idx += 1
-
-    return products
 
 # Fallback HTML parser for Mystery Bay (Wix store with JSON warmup data)
 def parse_mysterybay_html(content, game_query):
@@ -5430,7 +5074,6 @@ def search_game_structured(game_query):
         {"name": "epitrapez.io", "url": f"https://epitrapez.io/?s={encoded_query}&post_type=product&dgwt_wcas=1"},
         {"name": "No Label X", "url": f"https://www.skroutz.gr/c/259/epitrapezia/shop/7101/No-Label-X.html?keyphrase={encoded_query}"},
         {"name": "SoHotTCG", "url": f"https://www.skroutz.gr/c/259/epitrapezia/shop/27427/SoHotTCG.html?keyphrase={encoded_query}"},
-        {"name": "GamesUniverse", "url": f"https://gamesuniverse.gr/el/module/iqitsearch/searchiqit?s={encoded_query}"},
         {"name": "RollnPlay", "url": f"https://rollnplay.gr/?term=&s={encoded_query}&post_type=product&taxonomy=product_cat"},
         {"name": "PlayceShop", "url": f"https://shop.playce.gr/?s={encoded_query}&post_type=product&dgwt_wcas=1"},
         {"name": "Politeia", "url": f"https://www.politeianet.gr/el/search-results?query={encoded_query}"},
