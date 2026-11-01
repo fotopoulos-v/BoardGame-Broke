@@ -192,7 +192,7 @@ def try_apostrophe_variants(original_query, store_name, content, combined_data):
         elif store_name == "The Dragonphoenix Inn":
             return search_dragonphoenixinn(query)
         elif store_name == "GenX":
-            return parse_genx_html(content, query)
+            return parse_skroutz_shop_html(content, query)
         elif store_name == "eFantasy":
             return search_efantasy(query)
         elif store_name == "Public":
@@ -269,7 +269,7 @@ def try_apostrophe_variants(original_query, store_name, content, combined_data):
         elif store_name == "The Dragonphoenix Inn":
             retry_products = search_dragonphoenixinn(modified_query)
         elif store_name == "GenX":
-            retry_products = parse_genx_html(content, modified_query)
+            retry_products = parse_skroutz_shop_html(content, modified_query)
         elif store_name == "Public":
             retry_products = search_public(modified_query)
         elif store_name == "kiddylab":
@@ -315,7 +315,7 @@ def try_apostrophe_variants(original_query, store_name, content, combined_data):
                 elif store_name == "Public":
                     comparison_name = sanitize_public_name(p_name)
                     target_query = sanitize_public_name(modified_query)
-                elif store_name in ["No Label X", "SoHotTCG", "Tech City", "Game Theory", "Lex Hobby Store"]:
+                elif store_name in ["No Label X", "SoHotTCG", "Tech City", "Game Theory", "Lex Hobby Store", "GenX"]:
                     comparison_name = normalize_for_match(sanitize_nolabelx_name(p_name) if store_name != "Lex Hobby Store" else sanitize_lexhobby_name(p_name))
                     target_query = normalize_for_match(modified_query)
                 else:
@@ -393,7 +393,7 @@ def try_apostrophe_variants(original_query, store_name, content, combined_data):
             elif store_name == "Public":
                 comparison_name = sanitize_public_name(p_name)
                 target_query = sanitize_public_name(query_no_apostrophes)
-            elif store_name in ["No Label X", "SoHotTCG", "Tech City", "Game Theory", "Lex Hobby Store"]:
+            elif store_name in ["No Label X", "SoHotTCG", "Tech City", "Game Theory", "Lex Hobby Store", "GenX"]:
                 comparison_name = normalize_for_match(sanitize_nolabelx_name(p_name) if store_name != "Lex Hobby Store" else sanitize_lexhobby_name(p_name))
                 target_query = normalize_for_match(query_no_apostrophes)
             else:
@@ -3223,6 +3223,20 @@ parse_techcity_html = parse_skroutz_shop_html
 parse_gametheory_html = parse_skroutz_shop_html
 parse_lexhobby_html = parse_skroutz_shop_html
 
+SKROUTZ_STORES = ("No Label X", "SoHotTCG", "Tech City", "Game Theory", "Lex Hobby Store", "GenX")
+# Each extra page is one more Firecrawl credit. A Skroutz page holds 48 products.
+SKROUTZ_MAX_EXTRA_PAGES = 3
+
+
+def skroutz_next_page_url(content):
+    """Return the URL of the next Skroutz result page, or None on the last one."""
+    match = re.search(
+        r'<a\b[^>]*\bhref="([^"]+)"[^>]*\bclass="[^"]*\bbutton\b[^"]*\bnext\b[^"]*"',
+        content or "",
+        re.IGNORECASE,
+    )
+    return _html.unescape(match.group(1)) if match else None
+
 
 # Fallback HTML parser for Mystery Bay (Wix store with JSON warmup data)
 def parse_mysterybay_html(content, game_query):
@@ -5011,8 +5025,10 @@ def search_fantasygate(game_query):
 #
 # Nerdom and Meeple Planet are left out on purpose: both refuse direct requests
 # from Streamlit Cloud with HTTP 403 while answering other connections, so they
-# go through Firecrawl. search_nerdom and search_meepleplanet are kept for the
-# day a store allows the app in.
+# go through Firecrawl. GenX refuses Firecrawl as well, so it is read from its
+# Skroutz shop, whose prices can differ from its own site. search_nerdom,
+# search_meepleplanet and search_genx are kept for the day a store allows the
+# app in.
 DIRECT_SEARCH_FUNCS = {
     "Ozon.gr": search_ozon,
     "eFantasy": search_efantasy,
@@ -5021,7 +5037,6 @@ DIRECT_SEARCH_FUNCS = {
     "Crystal Lotus": search_crystallotus,
     "Gaming Galaxy": search_gaminggalaxy,
     "The Dragonphoenix Inn": search_dragonphoenixinn,
-    "GenX": search_genx,
     "Meeple On Board": search_meepleonboard,
     "PlayceShop": search_playceshop,
     "Boards of Madness": search_boardsofmadness,
@@ -5058,6 +5073,54 @@ def get_direct_search_func(store_name):
     return DIRECT_SEARCH_FUNCS.get(store_name)
 
 
+# ── Store health checks ──────────────────────────────────────────────────────
+# A search that finds nothing cannot tell "this store doesn't sell the game" from
+# "the store changed its pages and the parser reads nothing". Its "no results"
+# text cannot settle it: some stores print that text on every page, others never
+# do, and a page of filtered-out merchandise has none. So when a store finds
+# nothing and has returned no products lately, it is searched for games that
+# nearly every store carries. If those find nothing too, its pages are unreadable.
+STORE_CHECK_QUERIES = ("catan", "codenames", "dungeons", "pokemon", "dixit", "wingspan")
+STORE_CHECK_INTERVAL = 3 * 24 * 3600
+UNREADABLE_STORE_ERROR = "results could not be read (the store's pages may have changed)"
+
+_store_checks = {}
+_store_checks_lock = threading.Lock()
+
+
+def mark_store_readable(store_name):
+    """Record that *store_name* has just returned products."""
+    with _store_checks_lock:
+        _store_checks[store_name] = {"checked_at": time.time(), "readable": True}
+
+
+def store_is_readable(store_name, read_products):
+    """Return False when the store's pages no longer yield any products.
+
+    *read_products(query)* searches the store. If it raises, the store keeps its
+    last status and the next empty search tries again: a refused or failed request
+    says nothing about whether the pages can be read.
+    """
+    now = time.time()
+    with _store_checks_lock:
+        last = _store_checks.get(store_name, {"readable": True})
+        if now - last.get("checked_at", 0) < STORE_CHECK_INTERVAL:
+            return last["readable"]
+        # Claimed before checking, so parallel searches don't each run the check.
+        _store_checks[store_name] = {"checked_at": now, "readable": last["readable"]}
+
+    try:
+        readable = any(read_products(query) for query in STORE_CHECK_QUERIES)
+    except Exception:
+        with _store_checks_lock:
+            _store_checks[store_name] = last
+        return last["readable"]
+
+    with _store_checks_lock:
+        _store_checks[store_name] = {"checked_at": now, "readable": readable}
+    return readable
+
+
 def search_game_structured(game_query):
     """Search for a board game across multiple Greek stores"""
     encoded_query = urllib.parse.quote_plus(game_query)
@@ -5084,7 +5147,7 @@ def search_game_structured(game_query):
         {"name": "Gaming Galaxy", "url": f"https://ggalaxy.gr/catalogsearch/result/?q={encoded_query}"},
         {"name": "The Dragonphoenix Inn", "url": f"https://innkeeper.gr/?s={encoded_query}&post_type=product&dgwt_wcas=1"},
         {"name": "Lex Hobby Store", "url": f"https://www.skroutz.gr/c/259/epitrapezia/shop/29102/Lex-Hobby-Store.html?keyphrase={encoded_query}"},
-        {"name": "GenX", "url": f"https://www.genx.gr/index.php?act=viewCat&searchStr={encoded_query}"},
+        {"name": "GenX", "url": f"https://www.skroutz.gr/c/259/epitrapezia/shop/27812/GenX-Gaming-Store.html?keyphrase={encoded_query}"},
         {"name": "Public", "url": f"https://www.public.gr/search?q={encoded_query}&lmp=1&facetFilters=%5B%5B%22auto_category_path:%CE%A0%CE%B1%CE%B9%CF%87%CE%BD%CE%AF%CE%B4%CE%B9%CE%B1%20%26%20%CE%A0%CE%B1%CE%B9%CE%B4%CE%B9%CE%BA%CE%AC%C2%B7ic-games%20%3E%20%CE%95%CF%80%CE%B9%CF%84%CF%81%CE%B1%CF%80%CE%AD%CE%B6%CE%B9%CE%B1%22%5D%5D"},
         {"name": "VP shop", "url": f"https://shop.vpsaga.com/?s={encoded_query}&post_type=product"},
         {"name": "kiddylab", "url": f"https://www.kiddylab.gr/search-results?s={encoded_query}"},
@@ -5351,7 +5414,7 @@ def search_game_structured(game_query):
                     elif store_name == "The Dragonphoenix Inn":
                         raw_products = parse_dragonphoenixinn_html(content, game_query)
                     elif store_name == "GenX":
-                        raw_products = parse_genx_html(content, game_query)
+                        raw_products = parse_skroutz_shop_html(content, game_query)
                     elif store_name == "kiddylab":
                         raw_products = parse_kiddylab_html(content, game_query)
                     elif store_name == "Avalon Games":
@@ -5496,7 +5559,7 @@ def search_game_structured(game_query):
                     elif store_name == "The Dragonphoenix Inn":
                         retry_raw_products = parse_dragonphoenixinn_html(content, query_without_colon)
                     elif store_name == "GenX":
-                        retry_raw_products = parse_genx_html(content, query_without_colon)
+                        retry_raw_products = parse_skroutz_shop_html(content, query_without_colon)
                     elif store_name == "kiddylab":
                         retry_raw_products = parse_kiddylab_html(content, query_without_colon)
                     elif store_name == "Avalon Games":
@@ -5536,7 +5599,7 @@ def search_game_structured(game_query):
                         elif store_name == "eFantasy":
                             comparison_name = sanitize_efantasy_name(p_name)
                             target_query = sanitize_efantasy_name(query_without_colon)
-                        elif store_name in ["No Label X", "SoHotTCG", "Tech City", "Game Theory"]:
+                        elif store_name in ["No Label X", "SoHotTCG", "Tech City", "Game Theory", "GenX"]:
                             comparison_name = sanitize_nolabelx_name(p_name)
                             target_query = normalize_for_match(query_without_colon)
                         else:
@@ -5639,7 +5702,7 @@ def search_game_structured(game_query):
                     elif store_name == "The Dragonphoenix Inn":
                         retry_raw_products = parse_dragonphoenixinn_html(retry_content, query_without_dash)
                     elif store_name == "GenX":
-                        retry_raw_products = parse_genx_html(retry_content, query_without_dash)
+                        retry_raw_products = parse_skroutz_shop_html(retry_content, query_without_dash)
                     elif store_name == "kiddylab":
                         retry_raw_products = parse_kiddylab_html(retry_content, query_without_dash)
                     elif store_name == "Avalon Games":
@@ -5674,7 +5737,7 @@ def search_game_structured(game_query):
                         elif store_name == "eFantasy":
                             comparison_name = sanitize_efantasy_name(p_name)
                             target_query = sanitize_efantasy_name(query_without_dash)
-                        elif store_name in ["No Label X", "SoHotTCG", "Tech City", "Game Theory"]:
+                        elif store_name in ["No Label X", "SoHotTCG", "Tech City", "Game Theory", "GenX"]:
                             comparison_name = sanitize_nolabelx_name(p_name)
                             target_query = normalize_for_match(query_without_dash)
                         else:
