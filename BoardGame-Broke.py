@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 from firecrawl import Firecrawl
@@ -2822,7 +2823,7 @@ def parse_nerdom_html(content, game_query):
         })
     return products
 
-# ── Ozon.gr direct FastSimon API search ──────────────────────────
+# ── Ozon.gr direct Algolia search ────────────────────────────────
 
 # Greek name prefixes that indicate a board game / expansion on Ozon.gr.
 # Products without any of these keywords (e.g. books, puzzles, figurines) are filtered out.
@@ -2841,66 +2842,99 @@ def _is_ozon_boardgame(name):
     lower = name.lower()
     return any(kw in lower for kw in _OZON_BG_KEYWORDS)
 
-_OZON_FASTSIMON_UUID = "0cdd88e8-d8d1-4b9e-bfe0-c679e7f62eda"
+_OZON_ALGOLIA_APP_ID = "UV6ROQ523E"
+_OZON_ALGOLIA_INDEX = "ozonGR_default_products"
+_OZON_GAME_CATEGORIES = ["Παιχνίδια", "Παιχνίδια, χόμπι και παζλ"]
+# Stock labels of products that cannot be bought right now.
+_OZON_UNAVAILABLE_LABELS = ("Έχει εξαντληθεί", "Προπαραγγελία")
+# Every storefront page carries the search key; this is one of the smaller ones.
+_OZON_KEY_PAGE = "https://www.ozon.gr/customer/account/login/"
+_OZON_KEY_RENEWAL_MARGIN = 600
+
+_ozon_key = {"value": "", "expires": 0}
+_ozon_key_lock = threading.Lock()
+
+
+def parse_ozon_search_key(content):
+    """Return (key, expiry timestamp) from an Ozon.gr page, or None."""
+    match = re.search(r'"apiKey"\s*:\s*"([^"]+)"', content or "")
+    if not match:
+        return None
+    try:
+        decoded = base64.b64decode(match.group(1)).decode("utf-8", "replace")
+    except ValueError:
+        return None
+    expiry = re.search(r"validUntil=(\d+)", decoded)
+    return (match.group(1), int(expiry.group(1))) if expiry else None
+
+
+def _fetch_ozon_key_page():
+    """Return a storefront page, through Firecrawl if Ozon refuses the request."""
+    import requests as _requests
+    try:
+        response = _get_result_page(
+            _requests.get, _OZON_KEY_PAGE, 1, headers=_DIRECT_HTTP_HEADERS
+        )
+        return response.text
+    except DirectSearchError:
+        pass
+
+    # rawHtml, because the key sits in an inline script that html strips out.
+    _firecrawl_limiter.acquire()
+    result = app.scrape(
+        url=_OZON_KEY_PAGE,
+        formats=["rawHtml"],
+        only_main_content=False,
+        timeout=60000,
+    )
+    return getattr(result, "raw_html", "") or ""
+
+
+def _get_ozon_search_key():
+    """Return the search key, which Ozon reissues daily, from cache when possible."""
+    with _ozon_key_lock:
+        if time.time() < _ozon_key["expires"] - _OZON_KEY_RENEWAL_MARGIN:
+            return _ozon_key["value"]
+        parsed = parse_ozon_search_key(_fetch_ozon_key_page())
+        if not parsed:
+            raise DirectSearchError("could not read Ozon's search key")
+        _ozon_key["value"], _ozon_key["expires"] = parsed
+        return _ozon_key["value"]
+
 
 def search_ozon(game_query):
-    """Query Ozon.gr via the FastSimon search API (no Firecrawl needed)."""
+    """Query Algolia, the service behind Ozon.gr's own search (no Firecrawl needed)."""
     import requests as _requests
-    encoded = urllib.parse.quote_plus(game_query)
     api_url = (
-        f"https://fastsimon-search-service.akamaized.net/full_text_search"
-        f"?UUID={_OZON_FASTSIMON_UUID}&q={encoded}&pages=1&num=36"
+        f"https://{_OZON_ALGOLIA_APP_ID.lower()}-dsn.algolia.net"
+        f"/1/indexes/{_OZON_ALGOLIA_INDEX}/query"
     )
-    response = _get_result_page(_requests.get, api_url, 1)
-    return _with_live_ozon_details(parse_ozon_api(response.json(), game_query))
+    headers = {
+        "X-Algolia-Application-Id": _OZON_ALGOLIA_APP_ID,
+        "X-Algolia-API-Key": _get_ozon_search_key(),
+    }
+    payload = {
+        "query": game_query,
+        "hitsPerPage": 60,
+        "facetFilters": [[f"categories.level0:{c}" for c in _OZON_GAME_CATEGORIES]],
+        "attributesToRetrieve": ["name", "url", "price", "oz_common_stockstatus"],
+        "attributesToHighlight": [],
+    }
+    try:
+        response = _get_result_page(
+            _requests.post, api_url, 1, json=payload, headers=headers
+        )
+    except DirectSearchError:
+        # A refused key is dropped, so the next attempt fetches a new one.
+        _ozon_key["expires"] = 0
+        raise
+    return parse_ozon_search_results(response.json(), game_query)
 
 
-def parse_ozon_product_page(content):
-    """Return (price, in_stock) from an Ozon.gr product page, or None."""
-    # The meta tag, because the page's structured data prices sold-out games at 0.
-    price_match = re.search(
-        r'property="product:price:amount"\s+content="(\d+(?:\.\d+)?)"', content or ""
-    )
-    stock_match = re.search(
-        r'"availability"\s*:\s*"https?://schema\.org/(\w+)"', content or ""
-    )
-    if not price_match or not stock_match or not float(price_match.group(1)):
-        return None
-    return float(price_match.group(1)), stock_match.group(1) == "InStock"
-
-
-def _with_live_ozon_details(products):
-    """Replace the search feed's price and stock with the product page's.
-
-    The FastSimon feed lags behind the store in both directions: it can be well
-    above or below the real price, and it lists sold-out games as in stock. A
-    page that cannot be read keeps its feed values, so the game is still shown.
-    """
-    import requests as _requests
-    from concurrent.futures import ThreadPoolExecutor
-
-    def _read_page(product):
-        try:
-            response = _requests.get(product["url"], headers=_DIRECT_HTTP_HEADERS, timeout=15)
-        except Exception:
-            return None
-        return parse_ozon_product_page(response.text) if response.status_code == 200 else None
-
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        details = list(executor.map(_read_page, products))
-
-    for product, live in zip(products, details):
-        if live:
-            product["price"], product["is_in_stock"] = live
-    return products
-
-
-def parse_ozon_api(data, game_query):
-    """Parse FastSimon JSON payload from Ozon.gr and return product dicts."""
-    if not data or not isinstance(data, dict):
-        return []
-    items = data.get("items", [])
-    if not items:
+def parse_ozon_search_results(data, game_query):
+    """Parse Ozon.gr's Algolia results and return product dicts."""
+    hits = data.get("hits") if isinstance(data, dict) else None
+    if not hits:
         return []
 
     products = []
@@ -2908,14 +2942,14 @@ def parse_ozon_api(data, game_query):
     query_norm = normalize_for_match(_html.unescape(game_query))
     query_words = query_norm.split()
 
-    for item in items:
-        raw_name = (item.get("l") or "").strip()
-        url = (item.get("u") or "").strip()
+    for hit in hits:
+        raw_name = (hit.get("name") or "").strip()
+        url = (hit.get("url") or "").strip()
         if not raw_name or not url:
             continue
 
-        # The feed omits the trailing slash, and the redirect that adds it drops
-        # the query string, UTM tags included.
+        # The index omits the trailing slash, and the redirect that adds it
+        # drops the query string, UTM tags included.
         url = url.rstrip("/") + "/"
         if url in seen_urls:
             continue
@@ -2928,22 +2962,15 @@ def parse_ozon_api(data, game_query):
         if not _query_words_in_text(query_words, comparison_norm):
             continue
 
-        seen_urls.add(url)
-
-        # Price: prefer sale price (p), compare price (p_c) is the original
-        price_str = item.get("p") or ""
-        try:
-            price = float(price_str.replace(",", "."))
-        except (ValueError, AttributeError):
+        price = ((hit.get("price") or {}).get("EUR") or {}).get("default")
+        if not isinstance(price, (int, float)) or price <= 0:
             continue
 
-        # Stock: FastSimon field "iso" is True when item is sold-out
-        in_stock = not item.get("iso", False)
-
+        seen_urls.add(url)
         products.append({
             "name": raw_name,
-            "price": price,
-            "is_in_stock": in_stock,
+            "price": float(price),
+            "is_in_stock": hit.get("oz_common_stockstatus") not in _OZON_UNAVAILABLE_LABELS,
             "url": url,
         })
 
@@ -4701,6 +4728,10 @@ def _rate_limit_delay(error_msg):
 
 
 # scrape with retry logic
+# Stores whose parser needs inline scripts, which Firecrawl's html format strips.
+_FIRECRAWL_RAW_HTML_STORES = {"Meeple Planet"}
+
+
 def scrape_with_retry(app, url, store_name, max_retries=3, use_html_fallback=False):
     """Scrape with retry logic and exponential backoff"""
     for attempt in range(max_retries):
@@ -4723,13 +4754,16 @@ def scrape_with_retry(app, url, store_name, max_retries=3, use_html_fallback=Fal
             _firecrawl_limiter.acquire()
 
             if use_html_fallback:
+                use_raw_html = store_name in _FIRECRAWL_RAW_HTML_STORES
                 result = app.scrape(
                     url=url,
-                    formats=['html', 'markdown'],
+                    formats=['rawHtml' if use_raw_html else 'html', 'markdown'],
                     only_main_content=False,
                     actions=actions,
                     timeout=timeout
                 )
+                if use_raw_html:
+                    result.html = result.raw_html
             else:
                 result = app.scrape(
                     url=url,
@@ -5330,12 +5364,16 @@ def search_fantasygate(game_query):
 #     secret / environment variable (comma-separated store names, or "*" for
 #     all of them). Useful when a site changes its markup and the direct
 #     parser starts coming back empty.
+#
+# Nerdom and Meeple Planet are left out on purpose: both refuse direct requests
+# from Streamlit Cloud with HTTP 403 while answering other connections, so they
+# go through Firecrawl. search_nerdom and search_meepleplanet are kept for the
+# day a store allows the app in.
 DIRECT_SEARCH_FUNCS = {
     "Ozon.gr": search_ozon,
     "eFantasy": search_efantasy,
     "Public": search_public,
     "RollnPlay": search_rollnplay,
-    "Meeple Planet": search_meepleplanet,
     "Crystal Lotus": search_crystallotus,
     "Gaming Galaxy": search_gaminggalaxy,
     "The Dragonphoenix Inn": search_dragonphoenixinn,
@@ -5348,7 +5386,6 @@ DIRECT_SEARCH_FUNCS = {
     "The Game Rules": search_thegamerules,
     "Fantasy Shop": search_fantasyshop,
     "epitrapez.io": search_epitrapezio,
-    "Nerdom": search_nerdom,
     "Avalon Games": search_avalongames,
     "Fantasy Gate": search_fantasygate,
 }

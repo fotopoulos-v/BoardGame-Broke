@@ -35,8 +35,12 @@ To send such a store through Firecrawl, name it in the Streamlit secrets. This
 needs no redeploy, and each named store uses one more credit per search:
 
 ```toml
-BGB_FORCE_FIRECRAWL = "Nerdom,Meeple Planet"
+BGB_FORCE_FIRECRAWL = "Store One,Store Two"
 ```
+
+Nerdom and Meeple Planet already go through Firecrawl for this reason. Ozon.gr's
+search needs a key that lasts a day. The app reads it from Ozon's site, through
+Firecrawl if Ozon refuses the request, which then costs one credit a day.
 
 ## 2. Usage analytics (Supabase)
 
