@@ -26,9 +26,19 @@ st.set_page_config(
 import importlib.util, pathlib
 
 _mod_path = pathlib.Path(__file__).parent / "BoardGame-Broke.py"
-_spec = importlib.util.spec_from_file_location("boardgame_broke", _mod_path)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
+
+
+@st.cache_resource(show_spinner=False, max_entries=1)
+def _load_scraper(modified_at):
+    """Load the scraper once, so all visitors share its rate limiter and store
+    checks. *modified_at* makes a deployed change load the new code."""
+    spec = importlib.util.spec_from_file_location("boardgame_broke", _mod_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_mod = _load_scraper(_mod_path.stat().st_mtime)
 search_game_structured = _mod.search_game_structured
 
 from click_tracking import add_utm, build_redirect_url, summarize_store_results
