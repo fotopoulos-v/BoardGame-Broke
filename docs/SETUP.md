@@ -25,6 +25,19 @@ export FIRECRAWL_API_KEY="<your-firecrawl-key>"
 The optional `PUBLIC_FINDBAR_BEARER_TOKEN` and `PUBLIC_FINDBAR_SESSION_ID`
 overrides are resolved the same way, and fall back to built-in defaults.
 
+### Stores that refuse direct requests
+
+Most stores are searched over plain HTTP, which uses no Firecrawl credits. A store
+can refuse those requests from Streamlit's servers while still working from a home
+connection. It then shows as ❌ in *Store Coverage Details*, with the reason.
+
+To send such a store through Firecrawl, name it in the Streamlit secrets. This
+needs no redeploy, and each named store uses one more credit per search:
+
+```toml
+BGB_FORCE_FIRECRAWL = "Nerdom,Meeple Planet"
+```
+
 ## 2. Usage analytics (Supabase)
 
 The app can log anonymous usage events to Supabase for permanent analytics storage.

@@ -93,6 +93,31 @@ def price_sort_value(price_value):
     except (TypeError, ValueError):
         return float('inf')
 
+
+class DirectSearchError(Exception):
+    """A store did not answer a direct search, so its results are unknown."""
+
+
+def _get_result_page(request, url, page, timeout=15, **kwargs):
+    """Fetch one result page with *request* (requests.get, session.get, ...).
+
+    Returns the response, or None to end the paging when a later page fails.
+    A failed first page raises instead of looking like "no results": sites can
+    refuse requests from the cloud host while answering everyone else.
+    """
+    try:
+        response = request(url, timeout=timeout, **kwargs)
+    except Exception as exc:
+        reason = f"no response from the store ({type(exc).__name__})"
+    else:
+        if response.status_code == 200:
+            return response
+        reason = f"refused by the store (HTTP {response.status_code})"
+    if page == 1:
+        raise DirectSearchError(reason)
+    return None
+
+
 # Initialize
 if not FIRECRAWL_API_KEY:
     raise RuntimeError(
@@ -694,21 +719,24 @@ def search_efantasy(game_query):
     ]
 
     best_products = []
+    answered = False
+    failure = None
     for url in candidate_urls:
         try:
-            response = _requests.get(url, headers=headers, timeout=20)
-        except Exception:
+            response = _get_result_page(_requests.get, url, 1, timeout=20, headers=headers)
+        except DirectSearchError as exc:
+            failure = exc
             continue
 
-        if response.status_code != 200:
-            continue
-
+        answered = True
         products = _parse_efantasy_storefront_html(response.text or "", game_query)
         if len(products) > len(best_products):
             best_products = products
         if products:
             return products
 
+    if not answered:
+        raise failure
     return best_products
 
 
@@ -868,6 +896,8 @@ def search_public(game_query):
         [],
     ]
 
+    answered = False
+    failure = None
     for filters in filter_variants:
         products = []
         seen_urls = set()
@@ -890,17 +920,20 @@ def search_public(game_query):
                 payload["lmp"] = 1
 
             try:
-                response = _requests.post(
+                response = _get_result_page(
+                    _requests.post,
                     "https://app.findbar.io/api/v1/search",
+                    page,
                     json=payload,
                     headers=headers,
-                    timeout=15,
                 )
-                if response.status_code != 200:
-                    break
-            except Exception:
+            except DirectSearchError as exc:
+                failure = exc
+                break
+            if response is None:
                 break
 
+            answered = True
             page_products = parse_public_html(response.text, game_query)
             if not page_products:
                 if page == 1:
@@ -922,6 +955,8 @@ def search_public(game_query):
         if products:
             return products
 
+    if not answered:
+        raise failure
     return []
 
 # Non-board-game product-type keywords for The Game Rules.
@@ -2816,13 +2851,48 @@ def search_ozon(game_query):
         f"https://fastsimon-search-service.akamaized.net/full_text_search"
         f"?UUID={_OZON_FASTSIMON_UUID}&q={encoded}&pages=1&num=36"
     )
-    try:
-        resp = _requests.get(api_url, timeout=15)
-        if resp.status_code != 200:
-            return []
-        return parse_ozon_api(resp.json(), game_query)
-    except Exception:
-        return []
+    response = _get_result_page(_requests.get, api_url, 1)
+    return _with_live_ozon_details(parse_ozon_api(response.json(), game_query))
+
+
+def parse_ozon_product_page(content):
+    """Return (price, in_stock) from an Ozon.gr product page, or None."""
+    # The meta tag, because the page's structured data prices sold-out games at 0.
+    price_match = re.search(
+        r'property="product:price:amount"\s+content="(\d+(?:\.\d+)?)"', content or ""
+    )
+    stock_match = re.search(
+        r'"availability"\s*:\s*"https?://schema\.org/(\w+)"', content or ""
+    )
+    if not price_match or not stock_match or not float(price_match.group(1)):
+        return None
+    return float(price_match.group(1)), stock_match.group(1) == "InStock"
+
+
+def _with_live_ozon_details(products):
+    """Replace the search feed's price and stock with the product page's.
+
+    The FastSimon feed lags behind the store in both directions: it can be well
+    above or below the real price, and it lists sold-out games as in stock. A
+    page that cannot be read keeps its feed values, so the game is still shown.
+    """
+    import requests as _requests
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _read_page(product):
+        try:
+            response = _requests.get(product["url"], headers=_DIRECT_HTTP_HEADERS, timeout=15)
+        except Exception:
+            return None
+        return parse_ozon_product_page(response.text) if response.status_code == 200 else None
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        details = list(executor.map(_read_page, products))
+
+    for product, live in zip(products, details):
+        if live:
+            product["price"], product["is_in_stock"] = live
+    return products
 
 
 def parse_ozon_api(data, game_query):
@@ -2841,7 +2911,13 @@ def parse_ozon_api(data, game_query):
     for item in items:
         raw_name = (item.get("l") or "").strip()
         url = (item.get("u") or "").strip()
-        if not raw_name or not url or url in seen_urls:
+        if not raw_name or not url:
+            continue
+
+        # The feed omits the trailing slash, and the redirect that adds it drops
+        # the query string, UTM tags included.
+        url = url.rstrip("/") + "/"
+        if url in seen_urls:
             continue
 
         if not _is_ozon_boardgame(raw_name):
@@ -2898,7 +2974,7 @@ def parse_ozon_html(content, game_query):
     )
 
     for match in re.finditer(pattern, content, re.DOTALL | re.IGNORECASE):
-        url = match.group(1).strip()
+        url = match.group(1).strip().rstrip("/") + "/"
         raw_name = _html.unescape(' '.join(match.group(2).split()))
 
         if url in seen_urls:
@@ -4713,15 +4789,8 @@ def search_rollnplay(game_query):
         else:
             url = f"https://rollnplay.gr/page/{page}/?term=&s={encoded_query}&post_type=product&taxonomy=product_cat"
 
-        try:
-            response = session.get(url, headers=headers, timeout=15)
-            if response.status_code != 200:
-                if page == 1:
-                    return []
-                break
-        except Exception:
-            if page == 1:
-                return []
+        response = _get_result_page(session.get, url, page, headers=headers)
+        if response is None:
             break
 
         page_products = parse_rollnplay_html(response.text, game_query)
@@ -4775,11 +4844,8 @@ def search_meepleplanet(game_query):
         else:
             url = f"https://meeple-planet.com/page/{page}/?s={encoded_query}&post_type=product"
 
-        try:
-            response = session.get(url, headers=headers, timeout=15)
-            if response.status_code != 200:
-                break
-        except Exception:
+        response = _get_result_page(session.get, url, page, headers=headers)
+        if response is None:
             break
 
         page_products = parse_meepleplanet_html(response.text, game_query)
@@ -4840,7 +4906,7 @@ def search_crystallotus(game_query):
                 response = session.get(url, headers=headers, timeout=15)
                 if response.status_code == 200:
                     page_content = response.text
-                elif response.status_code == 429:
+                elif response.status_code == 429 or page == 1:
                     use_firecrawl_fallback = True
                 else:
                     break
@@ -4857,7 +4923,7 @@ def search_crystallotus(game_query):
             )
             if error or not result:
                 if page == 1 and not products:
-                    return []
+                    raise DirectSearchError("no response from the store (Firecrawl failed too)")
                 break
             html_content = result.html if hasattr(result, 'html') and result.html else ""
             markdown_content = result.markdown if hasattr(result, 'markdown') and result.markdown else ""
@@ -4906,11 +4972,8 @@ def search_gaminggalaxy(game_query):
             f"https://ggalaxy.gr/catalogsearch/result/?q={encoded_query}"
             f"&product_list_limit=36&p={page}"
         )
-        try:
-            response = _requests.get(url, headers=headers, timeout=15)
-            if response.status_code != 200:
-                break
-        except Exception:
+        response = _get_result_page(_requests.get, url, page, headers=headers)
+        if response is None:
             break
 
         page_products = parse_gaminggalaxy_html(response.text, game_query)
@@ -4956,15 +5019,8 @@ def search_dragonphoenixinn(game_query):
         else:
             url = f"https://innkeeper.gr/page/{page}/?s={encoded_query}&post_type=product&dgwt_wcas=1"
 
-        try:
-            response = session.get(url, headers=headers, timeout=15)
-            if response.status_code != 200:
-                if page == 1:
-                    return []
-                break
-        except Exception:
-            if page == 1:
-                return []
+        response = _get_result_page(session.get, url, page, headers=headers)
+        if response is None:
             break
 
         page_products = parse_dragonphoenixinn_html(response.text, game_query)
@@ -5021,11 +5077,8 @@ def search_genx(game_query):
         if page > 1:
             url += f"&page={page}"
 
-        try:
-            response = session.get(url, headers=headers, timeout=15)
-            if response.status_code != 200:
-                break
-        except Exception:
+        response = _get_result_page(session.get, url, page, headers=headers)
+        if response is None:
             break
 
         for p in parse_genx_html(response.text, game_query):
@@ -5075,11 +5128,8 @@ def _search_paged_html(parser, game_query, page_url, referer=None, max_pages=4):
     session = _requests.Session()
 
     for page in range(1, max_pages + 1):
-        try:
-            response = session.get(page_url(page), headers=headers, timeout=15)
-            if response.status_code != 200:
-                break
-        except Exception:
+        response = _get_result_page(session.get, page_url(page), page, headers=headers)
+        if response is None:
             break
 
         added_this_page = 0
