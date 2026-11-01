@@ -76,64 +76,9 @@ Here's what happens behind the scenes:
 
 ---
 
-## 📈 Permanent Usage Analytics (Supabase)
+## 🔒 Privacy
 
-The app can log anonymous usage events to Supabase for permanent analytics storage.
-
-### 1) Create the table in Supabase
-
-Open **SQL Editor** in Supabase and run the SQL from:
-
-- `supabase_usage_events.sql`
-
-### 2) Add Streamlit secrets
-
-In Streamlit Cloud app settings, add these secrets:
-
-```toml
-SUPABASE_URL = "https://<your-project-ref>.supabase.co"
-SUPABASE_SERVICE_ROLE_KEY = "<your-service-role-key>"
-SUPABASE_EVENTS_TABLE = "usage_events"
-```
-
-## Configuration
-
-The Firecrawl API key is **required** — the app will not start without it. It is
-never stored in the repository; `config.py` resolves it at runtime from Streamlit
-secrets first, then from an environment variable of the same name.
-
-**Streamlit Cloud:** add it under *App settings → Secrets*:
-
-```toml
-FIRECRAWL_API_KEY = "<your-firecrawl-key>"
-```
-
-**Local development:** put the same line in `.streamlit/secrets.toml` (git-ignored),
-or export it in your shell for running the scraper outside Streamlit:
-
-```bash
-export FIRECRAWL_API_KEY="<your-firecrawl-key>"
-```
-
-The optional `PUBLIC_FINDBAR_BEARER_TOKEN` and `PUBLIC_FINDBAR_SESSION_ID`
-overrides are resolved the same way, and fall back to built-in defaults.
-
-### 3) Optional runtime flags
-
-```toml
-BGB_USAGE_LOGGING = "1"
-BGB_USAGE_LOCAL_FALLBACK = "1"
-```
-
-- `BGB_USAGE_LOGGING=0` disables analytics.
-- `BGB_USAGE_LOCAL_FALLBACK=1` writes local JSONL when Supabase is unavailable.
-
-### 4) What gets logged
-
-- One event per search action: `search`
-- `status` is `completed` or `failed`
-- Includes timestamp, anonymous session ID, query, and summary fields
-  (duration, results, error count, selected store count).
+The app collects anonymous statistics: the games searched and the store links clicked. It has no user accounts and does not store IP addresses or browser details. Store links carry a tag so a store can see that the visit came from BoardGame Broke.
 
 ---
 

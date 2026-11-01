@@ -16,5 +16,6 @@ packages.txt
 .streamlit/
 
 supabase_usage_events.sql
+supabase/.temp/
 usage_events_rows.csv
 usage_events.jsonl

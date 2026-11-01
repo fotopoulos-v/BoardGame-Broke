@@ -31,6 +31,8 @@ _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 search_game_structured = _mod.search_game_structured
 
+from click_tracking import add_utm, build_redirect_url, summarize_store_results
+
 # ── Anonymous usage analytics (local JSONL, no third-party) ─────────────────
 USAGE_LOG_PATH = pathlib.Path(__file__).parent / "data" / "usage_events.jsonl"
 _USAGE_LOG_LOCK = threading.Lock()
@@ -105,6 +107,8 @@ def log_usage_event(event_type, **payload):
             "event": str(event_type),
             "session_id": str(session_id),
         }
+        if st.session_state.get("internal_traffic"):
+            event["internal"] = True
         event.update(payload)
 
         supabase_cfg = _get_supabase_config()
@@ -120,6 +124,41 @@ def log_usage_event(event_type, **payload):
         except Exception:
             # Analytics must never break app behavior.
             pass
+
+
+# ── Outbound click tracking ──────────────────────────────────────────────────
+# Without both settings, links stay direct to the store and clicks go uncounted.
+CLICK_REDIRECT_URL = _read_secret("CLICK_REDIRECT_URL")
+CLICK_SIGNING_SECRET = _read_secret("CLICK_SIGNING_SECRET")
+
+
+def build_store_link(item, section, position, click_context, source):
+    """Return the link for a result row, tracked when tracking is configured."""
+    target_url = add_utm(item.get("url", ""))
+    if not (target_url and CLICK_REDIRECT_URL and CLICK_SIGNING_SECRET):
+        return target_url
+
+    details = {
+        "session_id": st.session_state.get("anon_session_id", "unknown"),
+        "search_id": click_context.get("search_id"),
+        "query": click_context.get("query"),
+        "store": item.get("store"),
+        "game": item.get("name"),
+        "price": item.get("price"),
+        "position": position,
+        "section": section,
+        "in_stock": bool(item.get("in_stock")),
+        "is_cheapest": (
+            section == "exact"
+            and bool(item.get("in_stock"))
+            and _mod.price_sort_value(item.get("price")) == click_context.get("cheapest_price")
+        ),
+        "source": source,
+    }
+    if st.session_state.get("internal_traffic"):
+        details["internal"] = True
+    return build_redirect_url(CLICK_REDIRECT_URL, CLICK_SIGNING_SECRET, target_url, details)
+
 
 # ── Store list (mirrors the stores in BoardGame-Broke.py) ────────────────────
 STORE_LIST = [
@@ -513,12 +552,17 @@ for key, default in [
     ("show_stores", False),
     ("selected_stores", [s["name"] for s in STORE_LIST]),
     ("anon_session_id", ""),
+    ("internal_traffic", False),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
 if not st.session_state.anon_session_id:
     st.session_state.anon_session_id = uuid.uuid4().hex
+
+# Open the app with ?internal=1 to keep your own testing out of the store numbers.
+if st.query_params.get("internal") == "1":
+    st.session_state.internal_traffic = True
 
 
 def _set_selected_stores(store_names):
@@ -641,9 +685,10 @@ def format_price_display(price_value):
     return f"€{price_value}"
 
 # ── Helper: build HTML result table ──────────────────────────────────────────
-def build_html_table(items):
+def build_html_table(items, section, click_context):
     rows = ""
-    for item in items:
+    for position, item in enumerate(items, start=1):
+        store_link = build_store_link(item, section, position, click_context, "table")
         stock_badge = (
             '<span class="badge-instock">✅ In Stock</span>'
             if item["in_stock"]
@@ -657,7 +702,7 @@ def build_html_table(items):
             <td>{item['store']}</td>
             <td class="price-cell">{price_display}</td>
             <td>{stock_badge}</td>
-            <td><a href="{item['url']}" target="_blank" rel="noopener noreferrer">🔗 View</a></td>
+            <td><a href="{store_link}" target="_blank" rel="noopener">🔗 View</a></td>
         </tr>"""
     return f"""
     <div style="overflow-x:auto;">
@@ -685,7 +730,7 @@ def build_copy_text(items):
     return "\n".join(lines)
 
 
-def build_results_pdf(search_term, exact_matches, partial_matches):
+def build_results_pdf(search_term, exact_matches, partial_matches, click_context):
     """Generate a styled PDF for exact and partial matches with clickable product links."""
     try:
         from reportlab.lib import colors
@@ -880,7 +925,7 @@ def build_results_pdf(search_term, exact_matches, partial_matches):
         ),
     ]
 
-    def add_section(title, items):
+    def add_section(title, items, section):
         story.append(Paragraph(title, section_style))
         if not items:
             story.append(Paragraph("No results found.", body_style))
@@ -895,9 +940,9 @@ def build_results_pdf(search_term, exact_matches, partial_matches):
             Paragraph("<b>View</b>", body_style),
         ]]
 
-        for item in items:
+        for position, item in enumerate(items, start=1):
             stock_text = _pdf_text("In Stock" if item.get("in_stock") else "Out of Stock")
-            url = _pdf_text(item.get("url", ""))
+            url = _pdf_text(build_store_link(item, section, position, click_context, "pdf"))
             price_value = item.get('price', '')
             price_cell = "N/A" if str(price_value).strip().upper() == "N/A" else f"€ {price_value}"
             if url:
@@ -935,8 +980,8 @@ def build_results_pdf(search_term, exact_matches, partial_matches):
         story.append(table)
         story.append(Spacer(1, 10))
 
-    add_section("Exact Matches", exact_matches)
-    add_section("Partial Matches", partial_matches)
+    add_section("Exact Matches", exact_matches, "exact")
+    add_section("Partial Matches", partial_matches, "partial")
 
     doc.build(story)
     return buffer.getvalue()
@@ -1476,6 +1521,18 @@ if run_search and current_query:
         for ph in store_placeholders.values():
             ph.empty()
 
+        # Links clicks back to this search and records what each store offered.
+        search_id = uuid.uuid4().hex
+        store_summary = {}
+        if isinstance(results, dict):
+            results["search_id"] = search_id
+            store_summary = summarize_store_results(
+                results.get("exact_matches", []),
+                results.get("all_results", []),
+                _mod.price_sort_value,
+            )
+            results["cheapest_in_stock_price"] = store_summary["cheapest_in_stock_price"]
+
         st.session_state.results = results
         st.session_state.search_in_progress = False
 
@@ -1488,6 +1545,7 @@ if run_search and current_query:
         log_usage_event(
             "search",
             query=current_query,
+            search_id=search_id,
             status="completed",
             duration_ms=duration_ms,
             exact_match_count=exact_count,
@@ -1495,6 +1553,7 @@ if run_search and current_query:
             store_error_count=len(error_stores),
             stores_with_errors=error_stores,
             selected_store_count=len(active_stores),
+            **store_summary,
         )
 
 
@@ -1516,6 +1575,12 @@ with results_panel.container():
         exact_urls = {item["url"] for item in exact_matches}
         partial_matches = [item for item in all_results if item["url"] not in exact_urls]
 
+        click_context = {
+            "search_id": data.get("search_id"),
+            "query": data.get("search_term"),
+            "cheapest_price": data.get("cheapest_in_stock_price"),
+        }
+
         # Best price (in-stock exact matches first, then all in-stock)
         in_stock_exact = [x for x in exact_matches if x["in_stock"]]
         in_stock_all = [x for x in all_results if x["in_stock"]]
@@ -1534,7 +1599,7 @@ with results_panel.container():
         m4.metric("💰 Best Price", best_price_str)
 
         # ── Single export action for all results ─────────────────────────────────
-        pdf_bytes = build_results_pdf(st.session_state.query, exact_matches, partial_matches)
+        pdf_bytes = build_results_pdf(st.session_state.query, exact_matches, partial_matches, click_context)
         if pdf_bytes:
             st.download_button(
                 "📄 Download PDF Results",
@@ -1550,7 +1615,7 @@ with results_panel.container():
         st.markdown('<div class="section-header">🎯 Exact Matches</div>', unsafe_allow_html=True)
 
         if exact_matches:
-            st.markdown(build_html_table(exact_matches), unsafe_allow_html=True)
+            st.markdown(build_html_table(exact_matches, "exact", click_context), unsafe_allow_html=True)
         else:
             st.markdown("<p style='color:#B8A898; font-style:italic;'>No exact matches found for this title.</p>", unsafe_allow_html=True)
 
@@ -1558,7 +1623,7 @@ with results_panel.container():
         st.markdown('<div class="section-header">🔍 Partial Matches</div>', unsafe_allow_html=True)
 
         if partial_matches:
-            st.markdown(build_html_table(partial_matches), unsafe_allow_html=True)
+            st.markdown(build_html_table(partial_matches, "partial", click_context), unsafe_allow_html=True)
         else:
             st.markdown("<p style='color:#B8A898; font-style:italic;'>No partial matches found.</p>", unsafe_allow_html=True)
 

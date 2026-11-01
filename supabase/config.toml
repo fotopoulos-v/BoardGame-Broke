@@ -1,0 +1,6 @@
+project_id = "boardgame-broke"
+
+# A click on a store link sends no auth header. Links are protected by their
+# own signature instead; see functions/go/index.ts.
+[functions.go]
+verify_jwt = false
