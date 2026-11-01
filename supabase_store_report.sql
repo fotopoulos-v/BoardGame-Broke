@@ -3,6 +3,8 @@
 -- last result. Set the dates in each block before running it.
 --
 -- Clicks are counted once per search and link, so a double click counts once.
+-- Click rate is the share of a store's appearances with at least one click on
+-- it, so two products clicked in one search count once there.
 -- Traffic marked with ?internal=1 is left out.
 
 
@@ -44,6 +46,10 @@ store_clicks as (
     from clicks
     group by store
 ),
+clicked_searches as (
+    select distinct search_id, store
+    from clicks
+),
 -- Clicks that went elsewhere when this store also had the game in stock.
 lost as (
     select l.store, count(*) as lost_clicks
@@ -63,9 +69,10 @@ select
     count(*) filter (where l.exact_in_stock) as searches_with_game_in_stock,
     count(*) filter (where l.cheapest) as times_cheapest_in_stock,
     coalesce(sc.clicks, 0) as clicks,
-    round(100.0 * coalesce(sc.clicks, 0) / count(*), 1) as click_rate_pct,
+    round(100.0 * count(cs.search_id) / count(*), 1) as click_rate_pct,
     coalesce(lo.lost_clicks, 0) as clicks_lost_to_other_stores
 from listed l
+left join clicked_searches cs on cs.search_id = l.search_id and cs.store = l.store
 left join store_clicks sc on sc.store = l.store
 left join lost lo on lo.store = l.store
 group by l.store, sc.clicks, lo.lost_clicks
