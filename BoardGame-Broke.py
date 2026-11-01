@@ -5056,9 +5056,6 @@ def _parse_forced_firecrawl(raw):
     return {n for n in names if n}
 
 
-FORCED_FIRECRAWL_STORES = _parse_forced_firecrawl(get_secret("BGB_FORCE_FIRECRAWL"))
-
-
 def get_direct_search_func(store_name):
     """Return the direct-HTTP search function for *store_name*.
 
@@ -5066,9 +5063,11 @@ def get_direct_search_func(store_name):
     because it has no direct implementation, or because BGB_FORCE_FIRECRAWL
     pins it back onto Firecrawl.
     """
-    if "*" in FORCED_FIRECRAWL_STORES:
+    # Read on every call, so a changed secret applies without a restart.
+    forced_stores = _parse_forced_firecrawl(get_secret("BGB_FORCE_FIRECRAWL"))
+    if "*" in forced_stores:
         return None
-    if store_name.lower() in FORCED_FIRECRAWL_STORES:
+    if store_name.lower() in forced_stores:
         return None
     return DIRECT_SEARCH_FUNCS.get(store_name)
 
