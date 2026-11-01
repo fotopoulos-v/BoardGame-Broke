@@ -184,7 +184,7 @@ STORE_LIST = [
     {"name": "Gaming Galaxy",    "url": "https://ggalaxy.gr/paichnidia-me-kartes-kai-epitrapezia.html"},
     {"name": "The Dragonphoenix Inn", "url": "https://innkeeper.gr/product-category/board-games/"},
     {"name": "Lex Hobby Store",  "url": "https://www.skroutz.gr/c/259/epitrapezia/shop/29102/Lex-Hobby-Store.html"},
-    {"name": "GenX",             "url": "https://www.genx.gr/epitrapezia--paixnidia-c_60.html"},
+    {"name": "GenX",             "url": "https://www.skroutz.gr/c/259/epitrapezia/shop/27812/GenX-Gaming-Store.html"},
     {"name": "Public",           "url": "https://www.public.gr/cat/kids-and-toys/board-games/des-ta-ola"},
     {"name": "VP shop",          "url": "https://shop.vpsaga.com/"},
     {"name": "kiddylab",         "url": "https://www.kiddylab.gr/product-category/paixnidia-gia-paidia/epitrapezia-paixnidia/"},
@@ -1200,7 +1200,7 @@ if run_search and current_query:
                 {"name": "Gaming Galaxy",    "url": f"https://ggalaxy.gr/catalogsearch/result/?q={encoded_query}"},
                 {"name": "The Dragonphoenix Inn", "url": f"https://innkeeper.gr/?s={encoded_query}&post_type=product&dgwt_wcas=1"},
                 {"name": "Lex Hobby Store",  "url": f"https://www.skroutz.gr/c/259/epitrapezia/shop/29102/Lex-Hobby-Store.html?keyphrase={encoded_query}"},
-                {"name": "GenX",             "url": f"https://www.genx.gr/index.php?act=viewCat&searchStr={encoded_query}"},
+                {"name": "GenX",             "url": f"https://www.skroutz.gr/c/259/epitrapezia/shop/27812/GenX-Gaming-Store.html?keyphrase={encoded_query}"},
                 {"name": "Public",           "url": f"https://www.public.gr/search/?text={encoded_query}&type=product"},
                 {"name": "VP shop",          "url": f"https://shop.vpsaga.com/?s={encoded_query}&post_type=product"},
                 {"name": "kiddylab",         "url": f"https://www.kiddylab.gr/search-results?s={encoded_query}"},
@@ -1244,7 +1244,7 @@ if run_search and current_query:
                 if sname == "Kaissa":                return _m.parse_kaissa_html(content, query)
                 if sname == "Gaming Galaxy":         return _m.parse_gaminggalaxy_html(content, query)
                 if sname == "The Dragonphoenix Inn": return _m.parse_dragonphoenixinn_html(content, query)
-                if sname == "GenX":                  return _m.parse_genx_html(content, query)
+                if sname == "GenX":                  return _m.parse_skroutz_shop_html(content, query)
                 if sname == "Public":                return _m.parse_public_html(content, query)
                 if sname == "kiddylab":              return _m.parse_kiddylab_html(content, query)
                 if sname == "Avalon Games":          return _m.parse_avalongames_html(content, query)
@@ -1283,7 +1283,7 @@ if run_search and current_query:
                     elif sname == "Public":
                         comparison_name = _m.sanitize_public_name(p_name)
                         exact_target    = _m.sanitize_public_name(target_query)
-                    elif sname in ("No Label X", "SoHotTCG", "Tech City", "Game Theory", "Lex Hobby Store"):
+                    elif sname in _m.SKROUTZ_STORES:
                         comparison_name = _m.normalize_for_match(
                             _m.sanitize_nolabelx_name(p_name) if sname != "Lex Hobby Store"
                             else _m.sanitize_lexhobby_name(p_name)
@@ -1303,6 +1303,49 @@ if run_search and current_query:
                         combined_data["exact_matches"].append(entry)
                         added_exact += 1
                 return added, added_exact
+
+            # ── Firecrawl helpers ─────────────────────────────────────────────────
+            def _scrape_content(store, url, sem):
+                """Return the page's html and markdown, or an error message."""
+                with sem:
+                    result, error = _m.scrape_with_retry(
+                        _m.app, url, store["name"],
+                        max_retries=1, use_html_fallback=True,
+                    )
+                if error:
+                    return "", error
+                html_c = result.html     if hasattr(result, "html")     and result.html     else ""
+                md_c   = result.markdown if hasattr(result, "markdown") and result.markdown else ""
+                return html_c + md_c, None
+
+            def _with_more_skroutz_pages(store, content, sem):
+                """Append later result pages while they keep finding the game."""
+                page = content
+                for _ in range(_m.SKROUTZ_MAX_EXTRA_PAGES):
+                    next_url = _m.skroutz_next_page_url(page)
+                    if not next_url or not _parse_content(store["name"], page, game_query):
+                        break
+                    page, error = _scrape_content(store, next_url, sem)
+                    if error:
+                        break
+                    content += page
+                return content
+
+            def _firecrawl_store_products(store, query, sem):
+                """Return every product on the store's result page for *query*."""
+                url = store["url"].replace(f"={encoded_query}", f"={_urlparse.quote_plus(query)}")
+                content, error = _scrape_content(store, url, sem)
+                if error:
+                    raise RuntimeError(error)
+                return _parse_content(store["name"], content, "")
+
+            def _checked_result(store, raw, eff_query, read_products):
+                """Return the worker's result, reporting pages that cannot be read."""
+                if raw:
+                    _m.mark_store_readable(store["name"])
+                elif not _m.store_is_readable(store["name"], read_products):
+                    return store["name"], [], eff_query, _m.UNREADABLE_STORE_ERROR
+                return store["name"], raw or [], eff_query, None
 
             # ── worker: all I/O + parsing for one store, returns isolated results ─
             def _store_worker(store, sem):
@@ -1346,24 +1389,20 @@ if run_search and current_query:
                                 if raw:
                                     eff_query = qd
 
-                        return sname, raw or [], eff_query, None
+                        return _checked_result(store, raw, eff_query, direct_call)
 
                     else:
                         # --- Firecrawl path ---
-                        with sem:
-                            result, error = _m.scrape_with_retry(
-                                _m.app, store["url"], sname,
-                                max_retries=1, use_html_fallback=True,
-                            )
+                        read_products = lambda query: _firecrawl_store_products(store, query, sem)
+                        content, error = _scrape_content(store, store["url"], sem)
                         if error:
                             return sname, [], game_query, error
 
-                        html_c = result.html     if hasattr(result, "html")     and result.html     else ""
-                        md_c   = result.markdown if hasattr(result, "markdown") and result.markdown else ""
-                        content = html_c + md_c
-
                         if not content:
-                            return sname, [], game_query, None
+                            return _checked_result(store, [], game_query, read_products)
+
+                        if sname in _m.SKROUTZ_STORES:
+                            content = _with_more_skroutz_pages(store, content, sem)
 
                         raw = _parse_content(sname, content, game_query)
                         eff_query = game_query
@@ -1413,7 +1452,7 @@ if run_search and current_query:
                                 if raw:
                                     eff_query = qd
 
-                        return sname, raw or [], eff_query, None
+                        return _checked_result(store, raw, eff_query, read_products)
 
                 except Exception as exc:
                     return sname, [], game_query, str(exc)
@@ -1445,7 +1484,16 @@ if run_search and current_query:
                             error     = str(exc)
                             products  = []
                             eff_query = game_query
-                        if error:
+                        if error == _m.UNREADABLE_STORE_ERROR:
+                            # Retrying can't help, and would spend Firecrawl credits.
+                            combined_data["store_stats"][sname] = {"error": error}
+                            if ph:
+                                ph.markdown(
+                                    f"<div class='progress-store progress-store-error'>"
+                                    f"❌ <strong>{sname}</strong> — results could not be read</div>",
+                                    unsafe_allow_html=True,
+                                )
+                        elif error:
                             _failed.append(store)
                             combined_data["store_stats"][sname] = {"error": error[:200]}
                             if ph:

@@ -38,9 +38,23 @@ needs no redeploy, and each named store uses one more credit per search:
 BGB_FORCE_FIRECRAWL = "Store One,Store Two"
 ```
 
-Nerdom and Meeple Planet already go through Firecrawl for this reason. Ozon.gr's
-search needs a key that lasts a day. The app reads it from Ozon's site, through
-Firecrawl if Ozon refuses the request, which then costs one credit a day.
+Nerdom and Meeple Planet already go through Firecrawl for this reason. GenX refuses
+Firecrawl too, so it is read from its Skroutz shop. Ozon.gr's search needs a key
+that lasts a day. The app reads it from Ozon's site, through Firecrawl if Ozon
+refuses the request, which then costs one credit a day.
+
+### What the ❌ messages mean
+
+| Message | Meaning |
+|---|---|
+| `refused by the store (HTTP ...)` | The store turned the request away. |
+| `no response from the store (...)` | The request timed out or could not connect. |
+| `results could not be read ...` | The search worked, but popular games find nothing either, so the store has probably changed its pages and its parser needs fixing. |
+
+A store with ✅ and 0 items was checked and simply doesn't list that game. The
+check runs when a store finds nothing and has returned no products in the last
+three days, so it can take up to three days to catch a change. It uses at most a
+few credits per Firecrawl store each time, usually one.
 
 ## 2. Usage analytics (Supabase)
 
